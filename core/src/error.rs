@@ -20,7 +20,7 @@ use alloc::string::String;
 use coset::CoseError;
 
 /// AuthGraph error codes from the AIDL definition.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(i32)]
 pub enum ErrorCode {
     /// Success
@@ -73,5 +73,14 @@ impl From<alloc::collections::TryReserveError> for Error {
 macro_rules! ag_err {
     { $error_code:ident, $($arg:tt)+ } => {
         Error(ErrorCode::$error_code,
-                        alloc::format!("{}:{}: {}", file!(), line!(), format_args!($($arg)+))) };
+              alloc::format!("{}:{}: {}", file!(), line!(), format_args!($($arg)+))) };
+}
+
+/// Macro to build an [`Error`] instance.
+/// E.g. use: `ag_verr!(rc, "some {} format", arg)`.
+#[macro_export]
+macro_rules! ag_verr {
+    { $error_code:expr, $($arg:tt)+ } => {
+          Error($error_code,
+                alloc::format!("{}:{}: {}", file!(), line!(), format_args!($($arg)+))) };
 }
