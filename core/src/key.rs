@@ -21,9 +21,10 @@ use alloc::vec::Vec;
 use coset::{
     cbor::value::Value, iana::Algorithm, AsCborValue, CborSerializable, CoseError, CoseKey,
 };
+use zeroize::ZeroizeOnDrop;
 
 /// AES key of 256 bits
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct AesKey(pub [u8; 32]);
 
 /// Size (in bytes) of a curve 25519 private key.
@@ -52,12 +53,15 @@ pub struct EcExchangeKeyPub(pub CoseKey);
 
 /// Private key of an EC key pair created for ECDH.
 /// It is up to the implementers of the AuthGraph traits to decide how to encode the private key.
+#[derive(ZeroizeOnDrop)]
 pub struct EcExchangeKeyPriv(pub Vec<u8>);
 
 /// Shared secret agreed via ECDH
+#[derive(ZeroizeOnDrop)]
 pub struct EcdhSecret(pub Vec<u8>);
 
 /// Pseudo random key of 256 bits that is output by extract/expand functions of key derivation
+#[derive(ZeroizeOnDrop)]
 pub struct PseudoRandKey(pub [u8; 32]);
 
 /// A nonce of 16 bytes, used for key exchange
@@ -89,7 +93,7 @@ impl Nonce12 {
 pub struct MillisecondsSinceEpoch(pub i64);
 
 /// Variants of EC private key used to create signature
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub enum EcSignKey {
     /// On curve Ed25519
     Ed25519([u8; CURVE25519_PRIV_KEY_LEN]),
@@ -133,6 +137,7 @@ impl EcVerifyKey {
 }
 
 /// HMAC key of 256 bits
+#[derive(ZeroizeOnDrop)]
 pub struct HmacKey(pub [u8; 32]);
 
 /// Identity of an AuthGraph participant. The CDDL is listed in hardware/interfaces/security/
