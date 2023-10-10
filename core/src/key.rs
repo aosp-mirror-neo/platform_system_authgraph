@@ -15,11 +15,13 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
+use crate::ag_verr;
+use crate::error::{Error, ErrorCode};
 use crate::traits::Rng;
 use crate::FallibleAllocExt;
 use alloc::vec::Vec;
 use coset::{
-    cbor::value::Value, iana::Algorithm, AsCborValue, CborSerializable, CoseError, CoseKey,
+    cbor, cbor::value::Value, iana, AsCborValue, CborSerializable, CoseError, CoseKey, Label,
 };
 use zeroize::ZeroizeOnDrop;
 
@@ -127,11 +129,11 @@ impl EcVerifyKey {
     /// Return the Cose signing algorithm corresponds to the given public signing key.
     /// Assume that the `CoseKey` is checked for appropriate header parameters before it is used for
     /// signature verification.
-    pub fn get_cose_sign_algorithm(&self) -> Algorithm {
+    pub fn get_cose_sign_algorithm(&self) -> iana::Algorithm {
         match *self {
-            EcVerifyKey::Ed25519(_) => Algorithm::EdDSA,
-            EcVerifyKey::P256(_) => Algorithm::ES256,
-            EcVerifyKey::P384(_) => Algorithm::ES384,
+            EcVerifyKey::Ed25519(_) => iana::Algorithm::EdDSA,
+            EcVerifyKey::P256(_) => iana::Algorithm::ES256,
+            EcVerifyKey::P384(_) => iana::Algorithm::ES384,
         }
     }
 }
@@ -349,3 +351,33 @@ impl AsCborValue for SessionIdInput {
 }
 
 impl CborSerializable for SessionIdInput {}
+
+/// Given a `CoseKey` and the set of expected parameters, check if the `CoseKey` contains them.
+pub fn check_cose_key_params(
+    cose_key: &coset::CoseKey,
+    want_kty: iana::KeyType,
+    want_alg: iana::Algorithm,
+    want_curve: iana::EllipticCurve,
+    err_code: ErrorCode,
+) -> Result<(), Error> {
+    if cose_key.kty != coset::KeyType::Assigned(want_kty) {
+        return Err(ag_verr!(err_code, "invalid kty {:?}, expect {want_kty:?}", cose_key.kty));
+    }
+    if cose_key.alg != Some(coset::Algorithm::Assigned(want_alg)) {
+        return Err(ag_verr!(err_code, "invalid alg {:?}, expect {want_alg:?}", cose_key.alg));
+    }
+    let curve = cose_key
+        .params
+        .iter()
+        .find_map(|(l, v)| match (l, v) {
+            (Label::Int(l), Value::Integer(v)) if *l == iana::Ec2KeyParameter::Crv as i64 => {
+                Some(*v)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| ag_verr!(err_code, "no curve"))?;
+    if curve != cbor::value::Integer::from(want_curve as u64) {
+        return Err(ag_verr!(err_code, "invalid curve {curve:?}, expect {want_curve:?}"));
+    }
+    Ok(())
+}
