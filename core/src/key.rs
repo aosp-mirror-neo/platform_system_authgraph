@@ -15,9 +15,12 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
+use crate::traits::Rng;
 use crate::FallibleAllocExt;
 use alloc::vec::Vec;
-use coset::{cbor::value::Value, AsCborValue, CborSerializable, CoseError, CoseKey};
+use coset::{
+    cbor::value::Value, iana::Algorithm, AsCborValue, CborSerializable, CoseError, CoseKey,
+};
 
 /// AES key of 256 bits
 #[derive(Clone)]
@@ -61,8 +64,26 @@ pub struct PseudoRandKey(pub [u8; 32]);
 #[derive(Clone)]
 pub struct Nonce16(pub [u8; 16]);
 
+impl Nonce16 {
+    /// Create a random nonce of 16 bytes
+    pub fn new(rng: &mut dyn Rng) -> Self {
+        let mut nonce = Nonce16([0u8; 16]);
+        rng.fill_bytes(&mut nonce.0);
+        nonce
+    }
+}
+
 /// A nonce of 12 bytes, used for AES-GCM encryption
 pub struct Nonce12(pub [u8; 12]);
+
+impl Nonce12 {
+    /// Create a random nonce of 12 bytes
+    pub fn new(rng: &mut dyn Rng) -> Self {
+        let mut nonce = Nonce12([0u8; 12]);
+        rng.fill_bytes(&mut nonce.0);
+        nonce
+    }
+}
 
 /// Milliseconds since an epoch that is common between source and sink
 pub struct MillisecondsSinceEpoch(pub i64);
@@ -90,9 +111,23 @@ pub enum EcVerifyKey {
 }
 
 impl EcVerifyKey {
-    fn get_key(self) -> CoseKey {
+    /// Return the `CoseKey` contained in any variant of this enum.
+    /// Assume that the `CoseKey` is checked for appropriate header parameters before it used for
+    /// signature verifictation.
+    pub fn get_key(self) -> CoseKey {
         match self {
             EcVerifyKey::Ed25519(k) | EcVerifyKey::P256(k) | EcVerifyKey::P384(k) => k,
+        }
+    }
+
+    /// Return the Cose signing algorithm corresponds to the given public signing key.
+    /// Assume that the `CoseKey` is checked for appropriate header parameters before it is used for
+    /// signature verification.
+    pub fn get_cose_sign_algorithm(&self) -> Algorithm {
+        match *self {
+            EcVerifyKey::Ed25519(_) => Algorithm::EdDSA,
+            EcVerifyKey::P256(_) => Algorithm::ES256,
+            EcVerifyKey::P384(_) => Algorithm::ES384,
         }
     }
 }

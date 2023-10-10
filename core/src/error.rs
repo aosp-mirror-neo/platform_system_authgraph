@@ -67,7 +67,7 @@ impl From<alloc::collections::TryReserveError> for Error {
     }
 }
 
-/// Macro to build an [`AGError`] instance.
+/// Macro to build an [`Error`] instance.
 /// E.g. use: `ag_err!(InternalError, "some {} format", arg)`.
 #[macro_export]
 macro_rules! ag_err {
