@@ -90,8 +90,7 @@ pub fn create_arc(
     rng: &mut dyn Rng,
 ) -> Result<Vec<u8>, Error> {
     // Create a nonce for the encryption operation
-    let mut nonce_for_enc = Nonce12([0u8; 12]);
-    rng.fill_bytes(&mut nonce_for_enc.0);
+    let nonce_for_enc = Nonce12::new(rng);
     let mut protected_hdr = HeaderBuilder::new().algorithm(iana::Algorithm::A256GCM);
     for (lbl, val) in arc_content.protected_headers {
         match lbl {
