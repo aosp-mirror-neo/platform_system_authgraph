@@ -20,6 +20,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+pub mod arc;
 pub mod error;
 pub mod key;
 pub mod traits;
@@ -54,4 +55,23 @@ impl<T> FallibleAllocExt<T> for Vec<T> {
         self.extend_from_slice(other);
         Ok(())
     }
+}
+
+/// Macro to allocate a `Vec<T>` with the given length reserved, detecting allocation failure.
+#[macro_export]
+macro_rules! vec_try_with_capacity {
+    { $len:expr } => {
+        {
+            let mut v = alloc::vec::Vec::new();
+            v.try_reserve($len).map(|_| v)
+        }
+    }
+}
+
+/// Function that mimics `slice.to_vec()` but which detects allocation failures.
+#[inline]
+pub fn try_to_vec<T: Clone>(s: &[T]) -> Result<Vec<T>, alloc::collections::TryReserveError> {
+    let mut v = vec_try_with_capacity!(s.len())?;
+    v.extend_from_slice(s);
+    Ok(v)
 }
