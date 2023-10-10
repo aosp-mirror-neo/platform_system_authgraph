@@ -53,7 +53,7 @@ pub struct TraitImpl {
 }
 
 /// Trait methods for AES-GCM with 256 bit key (and 16 bytes tag).
-pub trait AesGcm {
+pub trait AesGcm: Send {
     /// Generate a key
     fn generate_key(&self, rng: &mut dyn Rng) -> Result<AesKey, Error> {
         let mut key = AesKey([0; 32]);
@@ -79,7 +79,7 @@ pub trait AesGcm {
 }
 
 /// Trait methods for ECDH key exchange with P256 curve
-pub trait EcDh {
+pub trait EcDh: Send {
     /// Generate an EC key with P256 curve for ECDH
     fn generate_key(&self) -> Result<EcExchangeKey, Error>;
     /// Compute the ECDH secret. You can safely assume that the `CoseKey` of `EcExchangeKeyPub` has
@@ -93,7 +93,7 @@ pub trait EcDh {
 
 /// Trait methods for EC sign/verify with EdDSA (with Ed25519 curve) and ECDSA (with P256 curve and
 /// SHA-256 digest, and P384 curve and SHA-384 digest).
-pub trait EcDsa {
+pub trait EcDsa: Send {
     /// Compute signature over the given data, using the given EC private key. You can mark this as
     /// unimplemented and instead implement the `sign_data` method in the `Device` trait if the
     /// private signing key is not readily available (i.e. `get_identity` in the `Device` trait
@@ -110,13 +110,13 @@ pub trait EcDsa {
 }
 
 /// Trait method for computing HMAC with 256-bit key and SHA-256 digest
-pub trait Hmac {
+pub trait Hmac: Send {
     /// Compute HMAC over the given data using the given key
     fn compute_hmac(&self, key: &HmacKey, data: &[u8]) -> Result<Vec<u8>, Error>;
 }
 
 /// Trait methods for extract and expand used in the key derivation process
-pub trait Hkdf {
+pub trait Hkdf: Send {
     /// Extract step in key derivation
     fn extract(&self, salt: &[u8], ikm: &EcdhSecret) -> Result<PseudoRandKey, Error>;
     /// Expand step in key derivation
@@ -124,19 +124,19 @@ pub trait Hkdf {
 }
 
 /// Trait method for computing cryptographic hash function on an input that outputs 256-bit hash.
-pub trait Sha256 {
+pub trait Sha256: Send {
     /// Compute SHA256 over an input
     fn compute_sha256(&self, data: &[u8]) -> Result<[u8; 32], Error>;
 }
 
 /// Trait methods for generating cryptographically secure random numbers
-pub trait Rng {
+pub trait Rng: Send {
     /// Create a cryptographically secure random bytes
     fn fill_bytes(&mut self, nonce: &mut [u8]);
 }
 
 /// Trait methods for retrieving device specific information and for device specific functionality
-pub trait Device {
+pub trait Device: Send {
     /// Retrieve (or create) the ephemeral (with per-boot life time) 256-bits encryption key to be
     /// used with AES-GCM
     fn get_or_create_per_boot_key(
@@ -202,7 +202,7 @@ pub trait Device {
 
 /// Trait method to get current time  w.r.t a monotonic clock since an epoch that is common between
 /// the source and sink.
-pub trait MonotonicClock {
+pub trait MonotonicClock: Send {
     /// Get the current time
     fn now(&self) -> MillisecondsSinceEpoch;
 }
