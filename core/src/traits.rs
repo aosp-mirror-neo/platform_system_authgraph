@@ -24,6 +24,7 @@ use crate::key::{
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use coset::iana::Algorithm;
 
 /// These trait implementations must be provided by an implementation of the Authgraph API.
 pub struct TraitImpl {
@@ -145,6 +146,8 @@ pub trait Device {
     fn get_per_boot_key(&self) -> Result<AesKey, Error>;
     /// Retrieve the identity of the AuthGraph participant, along with the signing key
     fn get_identity(&self) -> Result<(Option<EcSignKey>, Identity), Error>;
+    /// Retrieve the Cose signing algorithm corresponding to the signing key pair of the party.
+    fn get_cose_sign_algorithm(&self) -> Algorithm;
     /// Compute signature over the given data. This is an alternative to the `sign` method in the
     /// `EcDsa` trait, when the private signing key is not readily available (i.e. `get_identity` in
     /// the `Device` trait returns `None` for the first element of the returned tuple). If the
