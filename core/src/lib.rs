@@ -58,6 +58,18 @@ impl<T> FallibleAllocExt<T> for Vec<T> {
     }
 }
 
+/// Function that mimics `vec![<val>; <len>]` but which detects allocation failure with the given
+/// error.
+pub fn vec_try_fill_with_alloc_err<T: Clone>(
+    elem: T,
+    len: usize,
+) -> Result<Vec<T>, alloc::collections::TryReserveError> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve(len)?;
+    v.resize(len, elem);
+    Ok(v)
+}
+
 /// Macro to allocate a `Vec<T>` with the given length reserved, detecting allocation failure.
 #[macro_export]
 macro_rules! vec_try_with_capacity {
@@ -67,6 +79,14 @@ macro_rules! vec_try_with_capacity {
             v.try_reserve($len).map(|_| v)
         }
     }
+}
+
+/// Macro that mimics `vec![value; size]` but which detects allocation failure.
+#[macro_export]
+macro_rules! vec_try {
+    { $elem:expr ; $len:expr } => {
+        $crate::vec_try_fill_with_alloc_err($elem, $len)
+    };
 }
 
 /// Function that mimics `slice.to_vec()` but which detects allocation failures.
