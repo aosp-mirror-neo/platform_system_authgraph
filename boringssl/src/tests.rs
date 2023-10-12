@@ -16,6 +16,7 @@
 
 //! Tests for BoringSSL-based implementations of AuthGraph traits.
 
+use authgraph_core::traits;
 use authgraph_core_test as ag_test;
 
 #[test]
@@ -77,4 +78,34 @@ fn test_p256_round_trip() {
 #[test]
 fn test_p384_round_trip() {
     ag_test::test_p384_round_trip(&crate::BoringEcDsa);
+}
+
+#[test]
+fn test_key_exchange_protocol() {
+    let mut p1_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::<crate::test_device::AgDevice>::default(),
+        clock: None,
+    };
+    let mut p2_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::<crate::test_device::AgDevice>::default(),
+        clock: None,
+    };
+    ag_test::test_key_exchange_create(&mut p1_imp);
+    ag_test::test_key_exchange_init(&mut p1_imp, &mut p2_imp);
+    ag_test::test_key_exchange_finish(&mut p1_imp, &mut p2_imp);
+    ag_test::test_key_exchange_auth_complete(&mut p1_imp, &mut p2_imp);
 }
