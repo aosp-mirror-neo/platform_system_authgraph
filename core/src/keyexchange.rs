@@ -18,6 +18,7 @@
 //! (source) and P2 (sink).
 use crate::{
     ag_err, arc,
+    arc::ArcPayload,
     error::{Error, ErrorCode},
     key::{
         AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
@@ -27,6 +28,7 @@ use crate::{
     try_to_vec, FallibleAllocExt,
 };
 use alloc::vec::Vec;
+use core::mem::take;
 use coset::{
     cbor::value::Value, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
@@ -91,7 +93,7 @@ pub enum Role {
 /// Creates an ephemeral EC key pair for ECDH and a nonce (16 bytes).
 pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
     // Create an EC key for ECDH
-    let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: priv_key_for_ecdh } =
+    let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: mut priv_key_for_ecdh } =
         imp.ecdh.generate_key()?;
     // Create a nonce for key agreement
     let nonce_for_ke = Nonce16::new(&mut *imp.rng);
@@ -101,7 +103,11 @@ pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
     protected_headers.try_push((arc::KE_NONCE, Value::Bytes(nonce_for_ke.0.clone().to_vec())))?;
     let priv_key_arc = arc::create_arc(
         &pbk,
-        arc::ArcContent { payload: priv_key_for_ecdh.0, protected_headers, ..Default::default() },
+        arc::ArcContent {
+            payload: ArcPayload(take(&mut priv_key_for_ecdh.0)),
+            protected_headers,
+            ..Default::default()
+        },
         &*imp.aes_gcm,
         &mut *imp.rng,
     )?;
@@ -185,7 +191,7 @@ pub fn finish(
     own_ke_key: Key,
 ) -> Result<SessionInfo, Error> {
     let pbk = imp.device.get_per_boot_key()?;
-    let own_ke_key_arc_content = arc::decipher_arc(
+    let mut own_ke_key_arc_content = arc::decipher_arc(
         &pbk,
         &own_ke_key.arc_from_pbk.ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
         &*imp.aes_gcm,
@@ -196,9 +202,10 @@ pub fn finish(
     let (peer_pub_key, peer_identity, peer_nonce) =
         decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
-    let ecdh_secret = imp
-        .ecdh
-        .compute_shared_secret(&EcExchangeKeyPriv(own_ke_key_arc_content.payload), &peer_pub_key)?;
+    let ecdh_secret = imp.ecdh.compute_shared_secret(
+        &EcExchangeKeyPriv(take(&mut own_ke_key_arc_content.payload.0)),
+        &peer_pub_key,
+    )?;
 
     let (sign_key, own_identity) = imp.device.get_identity()?;
     let own_ke_pub_key = own_ke_key
@@ -405,7 +412,7 @@ fn create_shared_key_arcs(
     let in_encrypt_key_arc = arc::create_arc(
         &pbk,
         arc::ArcContent {
-            payload: in_encrypt_key.0.to_vec(),
+            payload: ArcPayload(in_encrypt_key.0.to_vec()),
             protected_headers: in_protected_headers,
             ..Default::default()
         },
@@ -426,7 +433,7 @@ fn create_shared_key_arcs(
     let out_encrypt_key_arc = arc::create_arc(
         &pbk,
         arc::ArcContent {
-            payload: out_encrypt_key.0.to_vec(),
+            payload: ArcPayload(out_encrypt_key.0.to_vec()),
             protected_headers: out_protected_headers,
             ..Default::default()
         },
