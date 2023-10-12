@@ -26,6 +26,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use coset::iana::Algorithm;
 
+/// The first version of the AuthGraph key exchange protocol
+pub const AG_KEY_EXCHANGE_PROTOCOL_VERSION_1: i32 = 1;
+
 /// These trait implementations must be provided by an implementation of the Authgraph API.
 pub struct TraitImpl {
     /// Implementation of AES-GCM functionality.
@@ -183,6 +186,18 @@ pub trait Device {
         latest_identity: &Identity,
         previous_identity: &Identity,
     ) -> Result<IdentityVerificationDecision, Error>;
+    /// Retrieve the latest supported version of the key exchange protocol by the source (P1).
+    /// Implementers of sinks can mark this as `Unimplemented`.
+    fn get_source_version(&self) -> i32 {
+        // There is only one version now
+        AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
+    }
+    /// Given the latest supported version supported by the source, retrieve the version supported
+    /// by the sink. Implementers of the sources can mark this as `Unimplemented`.
+    fn get_sink_version(&self, _peer_version: i32) -> i32 {
+        // There is only one version now
+        AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
+    }
 }
 
 /// Trait method to get current time  w.r.t a monotonic clock since an epoch that is common between

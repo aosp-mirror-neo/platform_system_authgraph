@@ -472,10 +472,16 @@ pub fn test_key_exchange_init(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
         ke_key: Key { pub_key: peer_ke_pub_key, .. },
         identity: peer_identity,
         nonce: peer_nonce,
+        version: peer_version,
     } = keyexchange::create(p1_imp).unwrap();
 
-    let init_result =
-        keyexchange::init(p2_imp, &peer_ke_pub_key.unwrap(), &peer_identity, &peer_nonce);
+    let init_result = keyexchange::init(
+        p2_imp,
+        &peer_ke_pub_key.unwrap(),
+        &peer_identity,
+        &peer_nonce,
+        peer_version,
+    );
     assert!(init_result.is_ok())
     // TODO: add more tests on init_result
 }
@@ -486,6 +492,7 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
         ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
         identity: p1_identity,
         nonce: p1_nonce,
+        version: p1_version,
     } = keyexchange::create(p1_imp).unwrap();
 
     let keyexchange::KEInitResult {
@@ -494,10 +501,17 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
                 identity: p2_identity,
                 nonce: p2_nonce,
+                version: p2_version,
             },
         session_info: keyexchange::SessionInfo { session_id_signature: p2_signature, .. },
-    } = keyexchange::init(p2_imp, p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce)
-        .unwrap();
+    } = keyexchange::init(
+        p2_imp,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
 
     let finish_result = keyexchange::finish(
         p1_imp,
@@ -505,6 +519,7 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
         &p2_identity,
         &p2_signature,
         &p2_nonce,
+        p2_version,
         Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
     );
     assert!(finish_result.is_ok())
@@ -517,6 +532,7 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
         ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
         identity: p1_identity,
         nonce: p1_nonce,
+        version: p1_version,
     } = keyexchange::create(p1_imp).unwrap();
 
     let keyexchange::KEInitResult {
@@ -525,6 +541,7 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
                 identity: p2_identity,
                 nonce: p2_nonce,
+                version: p2_version,
             },
         session_info:
             keyexchange::SessionInfo {
@@ -532,8 +549,14 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
                 session_id: p2_session_id,
                 session_id_signature: p2_signature,
             },
-    } = keyexchange::init(p2_imp, p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce)
-        .unwrap();
+    } = keyexchange::init(
+        p2_imp,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
 
     let keyexchange::SessionInfo {
         shared_keys: _p1_shared_keys,
@@ -545,6 +568,7 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
         &p2_identity,
         &p2_signature,
         &p2_nonce,
+        p2_version,
         Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
     )
     .unwrap();
