@@ -50,6 +50,8 @@ pub struct SessionInitiationInfo {
     pub identity: Vec<u8>,
     /// The nonce created by the party who creates the `ke_key`
     pub nonce: Vec<u8>,
+    /// The protocol version - to prevent protocol downgrade attacks.
+    pub version: i32,
 }
 
 /// Session information returned as part of the authenticated key exchange.
@@ -72,14 +74,6 @@ pub struct KEInitResult {
     pub session_init_info: SessionInitiationInfo,
     /// Session info
     pub session_info: SessionInfo,
-}
-
-/// Return type of the `authentication_complete` method
-pub struct KEAuthCompleteResult {
-    /// Two arcs created by encrypting the two shared encryption keys:
-    /// i) encryption key for the incoming messages
-    /// ii) encryption key for the outgoing messages
-    pub shared_keys: [Vec<u8>; 2],
 }
 
 /// Enum defining the roles played by the two AuthGraph participants
@@ -120,6 +114,7 @@ pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
         },
         identity: identity.to_vec()?,
         nonce: nonce_for_ke.0.to_vec(),
+        version: imp.device.get_source_version(),
     })
 }
 
@@ -130,7 +125,11 @@ pub fn init(
     peer_key: &[u8],
     peer_id: &[u8],
     peer_nonce: &[u8],
+    peer_version: i32,
 ) -> Result<KEInitResult, Error> {
+    if imp.device.get_sink_version(peer_version) > peer_version {
+        ag_err!(InternalError, "protocol version is greater than peer's version");
+    }
     let key_for_ecdh = imp.ecdh.generate_key()?;
     let own_nonce = Nonce16::new(&mut *imp.rng);
 
@@ -141,6 +140,7 @@ pub fn init(
     let (sign_key, own_identity) = imp.device.get_identity()?;
 
     let salt_input = SaltInput {
+        source_version: peer_version,
         sink_ke_pub_key: key_for_ecdh.pub_key.clone(),
         source_ke_pub_key: peer_pub_key,
         sink_ke_nonce: own_nonce.clone(),
@@ -176,6 +176,7 @@ pub fn init(
             ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
             identity: own_identity.to_vec()?,
             nonce: own_nonce.0.to_vec(),
+            version: imp.device.get_sink_version(peer_version),
         },
         session_info: SessionInfo { shared_keys, session_id, session_id_signature: signature },
     })
@@ -189,8 +190,12 @@ pub fn finish(
     peer_id: &[u8],
     peer_sig: &[u8],
     peer_nonce: &[u8],
+    peer_version: i32,
     own_ke_key: Key,
 ) -> Result<SessionInfo, Error> {
+    if imp.device.get_source_version() < peer_version {
+        ag_err!(IncompatibleProtocolVersion, "peer's protocol version is incompatible");
+    }
     let pbk = imp.device.get_per_boot_key()?;
     let mut own_ke_key_arc_content = arc::decipher_arc(
         &pbk,
@@ -219,6 +224,7 @@ pub fn finish(
     );
 
     let salt_input = SaltInput {
+        source_version: imp.device.get_source_version(),
         sink_ke_pub_key: peer_pub_key,
         source_ke_pub_key: own_ke_pub_key,
         sink_ke_nonce: peer_nonce.clone(),
@@ -263,7 +269,7 @@ pub fn authentication_complete(
     imp: &mut TraitImpl,
     peer_sig: &[u8],
     shared_keys: [Vec<u8>; 2],
-) -> Result<KEAuthCompleteResult, Error> {
+) -> Result<[Vec<u8>; 2], Error> {
     let in_key_arc = &shared_keys[0];
     let out_key_arc = &shared_keys[1];
 
@@ -294,7 +300,7 @@ pub fn authentication_complete(
     let updated_shared_key_arcs =
         auth_complete_shared_key_arcs(in_key_arc_content, out_key_arc_content, imp)?;
 
-    Ok(KEAuthCompleteResult { shared_keys: updated_shared_key_arcs })
+    Ok(updated_shared_key_arcs)
 }
 
 fn decode_peer_info(
