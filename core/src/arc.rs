@@ -28,6 +28,7 @@ use coset::{
     cbor::value::Value, iana, AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder,
     CoseError, HeaderBuilder, Label,
 };
+use zeroize::ZeroizeOnDrop;
 
 /// Protected header label for permissions
 pub const PERMISSIONS: Label = Label::Int(-70001);
@@ -68,11 +69,15 @@ pub enum DirectionOfEncryption {
     Out = 2,
 }
 
+/// Payload of an arc in plain text
+#[derive(Default, ZeroizeOnDrop)]
+pub struct ArcPayload(pub Vec<u8>);
+
 /// The structure containing the contents of an arc.
 #[derive(Default)]
 pub struct ArcContent {
     /// Payload in plain text
-    pub payload: Vec<u8>,
+    pub payload: ArcPayload,
     /// Protocol specific protected headers
     pub protected_headers: Vec<(Label, Value)>,
     /// Protocol specific unprotected headers
@@ -118,7 +123,7 @@ pub fn create_arc(
     let arc = CoseEncrypt0Builder::new()
         .protected(protected_hdr.build())
         .unprotected(unprotected_hdr.build())
-        .try_create_ciphertext(&arc_content.payload, &[], |input, aad| {
+        .try_create_ciphertext(&arc_content.payload.0.clone(), &[], |input, aad| {
             cipher.encrypt(encrypting_key, input, aad, &nonce_for_enc)
         })?
         .build();
@@ -144,7 +149,7 @@ pub fn decipher_arc(
     })?;
     let (protected_headers, unprotected_headers) =
         (arc.protected.header.rest, arc.unprotected.rest);
-    Ok(ArcContent { payload, protected_headers, unprotected_headers })
+    Ok(ArcContent { payload: ArcPayload(payload), protected_headers, unprotected_headers })
 }
 
 /// A structure encapsulating the (optional) permissions added to an arc as a protected header.

@@ -23,7 +23,7 @@ use authgraph_core::{
     traits, try_to_vec,
 };
 use core::ops::DerefMut;
-use coset::{cbor, cbor::Value, iana, Label};
+use coset::{cbor, cbor::Value, iana, CoseKey, Label};
 
 /// Initial byte of SEC1 public key encoding that indicates an uncompressed point.
 pub const SEC1_UNCOMPRESSED_PREFIX: u8 = 0x04;
@@ -33,26 +33,7 @@ pub struct BoringEcDh;
 
 impl traits::EcDh for BoringEcDh {
     fn generate_key(&self) -> Result<EcExchangeKey, Error> {
-        let group =
-            ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1))?;
-        let ec_priv_key = ossl!(openssl::ec::EcKey::<openssl::pkey::Private>::generate(&group))?;
-        // Convert the private key to DER-encoded `ECPrivateKey` as per RFC5915 s3, which is
-        // our choice of private key encoding.
-        let priv_key = ossl!(ec_priv_key.private_key_to_der())?;
-
-        // Get the public key point, and convert to (x, y) coordinates.
-        let pub_key_pt = ec_priv_key.public_key();
-        let mut bn_ctx = ossl!(openssl::bn::BigNumContext::new())?;
-        let pub_key_sec1 = ossl!(pub_key_pt.to_bytes(
-            group.as_ref(),
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            bn_ctx.deref_mut()
-        ))?;
-        let (x, y) = coords_from_p256_pub_key(&pub_key_sec1)?;
-
-        let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(iana::EllipticCurve::P_256, x, y)
-            .algorithm(iana::Algorithm::ECDH_ES_HKDF_256)
-            .build();
+        let (priv_key, pub_key) = create_p256_key_pair(iana::Algorithm::ECDH_ES_HKDF_256)?;
 
         Ok(EcExchangeKey {
             priv_key: EcExchangeKeyPriv(priv_key),
@@ -147,6 +128,30 @@ impl traits::EcDsa for BoringEcDsa {
             Err(ag_err!(InvalidSignature, "signature verification failed"))
         }
     }
+}
+
+/// Create an EC key pair on P-256 curve and return a tuple consisting of the private key bytes
+/// and the public key as a `CoseKey`.
+pub fn create_p256_key_pair(algorithm: iana::Algorithm) -> Result<(Vec<u8>, CoseKey), Error> {
+    let group = ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1))?;
+    let ec_priv_key = ossl!(openssl::ec::EcKey::<openssl::pkey::Private>::generate(&group))?;
+    // Convert the private key to DER-encoded `ECPrivateKey` as per RFC5915 s3, which is
+    // our choice of private key encoding.
+    let priv_key = ossl!(ec_priv_key.private_key_to_der())?;
+
+    // Get the public key point, and convert to (x, y) coordinates.
+    let pub_key_pt = ec_priv_key.public_key();
+    let mut bn_ctx = ossl!(openssl::bn::BigNumContext::new())?;
+    let pub_key_sec1 = ossl!(pub_key_pt.to_bytes(
+        group.as_ref(),
+        openssl::ec::PointConversionForm::UNCOMPRESSED,
+        bn_ctx.deref_mut()
+    ))?;
+    let (x, y) = crate::ec::coords_from_p256_pub_key(&pub_key_sec1)?;
+    let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(iana::EllipticCurve::P_256, x, y)
+        .algorithm(algorithm)
+        .build();
+    Ok((priv_key, pub_key))
 }
 
 /// Helper function to return the (x,y) coordinates, given the public key as a SEC-1 encoded
