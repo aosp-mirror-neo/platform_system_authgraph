@@ -205,6 +205,7 @@ pub struct Key {
 /// The structure containing the inputs for the `salt` used in extracting a pseudo random key
 /// from the Diffie-Hellman secret.
 /// salt = bstr .cbor [
+///     source_version:    int,
 ///     sink_ke_pub_key:   bstr .cbor PlainPubKey,
 ///     source_ke_pub_key: bstr .cbor PlainPubKey,
 ///     sink_ke_nonce:     bstr .size 16,
@@ -213,6 +214,8 @@ pub struct Key {
 ///     source_cert_chain: bstr .cbor ExplicitKeyDiceCertChain,
 /// ]
 pub struct SaltInput {
+    /// Version advertised by the source (P1).
+    pub source_version: i32,
     /// Public key from sink for key exchange
     pub sink_ke_pub_key: EcExchangeKeyPub,
     /// Public key from source for ke exchange
@@ -322,7 +325,8 @@ impl AsCborValue for SaltInput {
 
     fn to_cbor_value(self) -> Result<Value, CoseError> {
         let mut array = Vec::<Value>::new();
-        array.try_reserve(6).map_err(|_| CoseError::EncodeFailed)?;
+        array.try_reserve(7).map_err(|_| CoseError::EncodeFailed)?;
+        array.push(Value::Integer(self.source_version.into()));
         array.push(Value::Bytes(self.sink_ke_pub_key.0.to_vec()?));
         array.push(Value::Bytes(self.source_ke_pub_key.0.to_vec()?));
         array.push(Value::Bytes(self.sink_ke_nonce.0.to_vec()));
