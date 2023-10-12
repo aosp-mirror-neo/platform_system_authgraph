@@ -21,16 +21,17 @@ use crate::{
     arc::ArcPayload,
     error::{Error, ErrorCode},
     key::{
-        AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
-        EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey, SaltInput, SessionIdInput,
+        check_cose_key_params, AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub,
+        EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey,
+        SaltInput, SessionIdInput,
     },
-    traits::{EcDsa, Hkdf, Sha256, TraitImpl},
+    traits::{EcDh, EcDsa, Hkdf, Sha256, TraitImpl},
     try_to_vec, FallibleAllocExt,
 };
 use alloc::vec::Vec;
 use core::mem::take;
 use coset::{
-    cbor::value::Value, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
+    cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
 };
 
@@ -136,7 +137,7 @@ pub fn init(
     let (peer_pub_key, peer_identity, peer_nonce) =
         decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
-    let ecdh_secret = imp.ecdh.compute_shared_secret(&key_for_ecdh.priv_key, &peer_pub_key)?;
+    let ecdh_secret = compute_shared_secret(&*imp.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
     let (sign_key, own_identity) = imp.device.get_identity()?;
 
     let salt_input = SaltInput {
@@ -202,7 +203,8 @@ pub fn finish(
     let (peer_pub_key, peer_identity, peer_nonce) =
         decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
-    let ecdh_secret = imp.ecdh.compute_shared_secret(
+    let ecdh_secret = compute_shared_secret(
+        &*imp.ecdh,
         &EcExchangeKeyPriv(take(&mut own_ke_key_arc_content.payload.0)),
         &peer_pub_key,
     )?;
@@ -312,6 +314,21 @@ fn decode_peer_info(
     Ok((pub_key, identity, nonce))
 }
 
+fn compute_shared_secret(
+    ecdh: &dyn EcDh,
+    own_key: &EcExchangeKeyPriv,
+    peer_key: &EcExchangeKeyPub,
+) -> Result<EcdhSecret, Error> {
+    check_cose_key_params(
+        &peer_key.0,
+        iana::KeyType::EC2,
+        iana::Algorithm::ECDH_ES_HKDF_256, // ECDH
+        iana::EllipticCurve::P_256,
+        ErrorCode::InvalidPeerKeKey,
+    )?;
+    ecdh.compute_shared_secret(own_key, peer_key)
+}
+
 fn compute_salt(salt_input: SaltInput, sha_256: &dyn Sha256) -> Result<[u8; 32], Error> {
     sha_256.compute_sha256(&salt_input.to_vec()?)
 }
@@ -365,8 +382,36 @@ fn verify_signature_on_session_id(
     signature: &[u8],
     ecdsa: &dyn EcDsa,
 ) -> Result<(), Error> {
-    // TOOD: check approrpriate parameters in `verify_key`
     let cose_sign1 = CoseSign1::from_slice(signature)?;
+    match verify_key {
+        EcVerifyKey::Ed25519(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::OKP,
+                iana::Algorithm::EdDSA,
+                iana::EllipticCurve::Ed25519,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+        EcVerifyKey::P256(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::EC2,
+                iana::Algorithm::ES256, // ECDSA
+                iana::EllipticCurve::P_256,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+        EcVerifyKey::P384(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::EC2,
+                iana::Algorithm::ES384,
+                iana::EllipticCurve::P_384,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+    }
     cose_sign1.verify_detached_signature(session_id, &[], |signature, data| {
         ecdsa.verify_signature(verify_key, data, signature)
     })
