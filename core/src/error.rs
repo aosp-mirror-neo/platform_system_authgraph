@@ -49,6 +49,8 @@ pub enum ErrorCode {
     InternalError = -11,
     /// Unimplemented
     Unimplemented = -12,
+    /// The protocol version negotiated with the sink is incompatible
+    IncompatibleProtocolVersion = -13,
 }
 
 /// AuthGraph error type.

@@ -18,17 +18,20 @@
 //! (source) and P2 (sink).
 use crate::{
     ag_err, arc,
+    arc::ArcPayload,
     error::{Error, ErrorCode},
     key::{
-        AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
-        EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey, SaltInput, SessionIdInput,
+        check_cose_key_params, AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub,
+        EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey,
+        SaltInput, SessionIdInput,
     },
-    traits::{EcDsa, Hkdf, Sha256, TraitImpl},
+    traits::{EcDh, EcDsa, Hkdf, Sha256, TraitImpl},
     try_to_vec, FallibleAllocExt,
 };
 use alloc::vec::Vec;
+use core::mem::take;
 use coset::{
-    cbor::value::Value, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
+    cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
 };
 
@@ -47,6 +50,8 @@ pub struct SessionInitiationInfo {
     pub identity: Vec<u8>,
     /// The nonce created by the party who creates the `ke_key`
     pub nonce: Vec<u8>,
+    /// The protocol version - to prevent protocol downgrade attacks.
+    pub version: i32,
 }
 
 /// Session information returned as part of the authenticated key exchange.
@@ -71,14 +76,6 @@ pub struct KEInitResult {
     pub session_info: SessionInfo,
 }
 
-/// Return type of the `authentication_complete` method
-pub struct KEAuthCompleteResult {
-    /// Two arcs created by encrypting the two shared encryption keys:
-    /// i) encryption key for the incoming messages
-    /// ii) encryption key for the outgoing messages
-    pub shared_keys: [Vec<u8>; 2],
-}
-
 /// Enum defining the roles played by the two AuthGraph participants
 pub enum Role {
     /// AuthGraph source
@@ -91,7 +88,7 @@ pub enum Role {
 /// Creates an ephemeral EC key pair for ECDH and a nonce (16 bytes).
 pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
     // Create an EC key for ECDH
-    let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: priv_key_for_ecdh } =
+    let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: mut priv_key_for_ecdh } =
         imp.ecdh.generate_key()?;
     // Create a nonce for key agreement
     let nonce_for_ke = Nonce16::new(&mut *imp.rng);
@@ -101,7 +98,11 @@ pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
     protected_headers.try_push((arc::KE_NONCE, Value::Bytes(nonce_for_ke.0.clone().to_vec())))?;
     let priv_key_arc = arc::create_arc(
         &pbk,
-        arc::ArcContent { payload: priv_key_for_ecdh.0, protected_headers, ..Default::default() },
+        arc::ArcContent {
+            payload: ArcPayload(take(&mut priv_key_for_ecdh.0)),
+            protected_headers,
+            ..Default::default()
+        },
         &*imp.aes_gcm,
         &mut *imp.rng,
     )?;
@@ -113,6 +114,7 @@ pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
         },
         identity: identity.to_vec()?,
         nonce: nonce_for_ke.0.to_vec(),
+        version: imp.device.get_source_version(),
     })
 }
 
@@ -123,17 +125,22 @@ pub fn init(
     peer_key: &[u8],
     peer_id: &[u8],
     peer_nonce: &[u8],
+    peer_version: i32,
 ) -> Result<KEInitResult, Error> {
+    if imp.device.get_sink_version(peer_version) > peer_version {
+        ag_err!(InternalError, "protocol version is greater than peer's version");
+    }
     let key_for_ecdh = imp.ecdh.generate_key()?;
     let own_nonce = Nonce16::new(&mut *imp.rng);
 
     let (peer_pub_key, peer_identity, peer_nonce) =
         decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
-    let ecdh_secret = imp.ecdh.compute_shared_secret(&key_for_ecdh.priv_key, &peer_pub_key)?;
+    let ecdh_secret = compute_shared_secret(&*imp.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
     let (sign_key, own_identity) = imp.device.get_identity()?;
 
     let salt_input = SaltInput {
+        source_version: peer_version,
         sink_ke_pub_key: key_for_ecdh.pub_key.clone(),
         source_ke_pub_key: peer_pub_key,
         sink_ke_nonce: own_nonce.clone(),
@@ -169,6 +176,7 @@ pub fn init(
             ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
             identity: own_identity.to_vec()?,
             nonce: own_nonce.0.to_vec(),
+            version: imp.device.get_sink_version(peer_version),
         },
         session_info: SessionInfo { shared_keys, session_id, session_id_signature: signature },
     })
@@ -182,10 +190,14 @@ pub fn finish(
     peer_id: &[u8],
     peer_sig: &[u8],
     peer_nonce: &[u8],
+    peer_version: i32,
     own_ke_key: Key,
 ) -> Result<SessionInfo, Error> {
+    if imp.device.get_source_version() < peer_version {
+        ag_err!(IncompatibleProtocolVersion, "peer's protocol version is incompatible");
+    }
     let pbk = imp.device.get_per_boot_key()?;
-    let own_ke_key_arc_content = arc::decipher_arc(
+    let mut own_ke_key_arc_content = arc::decipher_arc(
         &pbk,
         &own_ke_key.arc_from_pbk.ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
         &*imp.aes_gcm,
@@ -196,9 +208,11 @@ pub fn finish(
     let (peer_pub_key, peer_identity, peer_nonce) =
         decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
-    let ecdh_secret = imp
-        .ecdh
-        .compute_shared_secret(&EcExchangeKeyPriv(own_ke_key_arc_content.payload), &peer_pub_key)?;
+    let ecdh_secret = compute_shared_secret(
+        &*imp.ecdh,
+        &EcExchangeKeyPriv(take(&mut own_ke_key_arc_content.payload.0)),
+        &peer_pub_key,
+    )?;
 
     let (sign_key, own_identity) = imp.device.get_identity()?;
     let own_ke_pub_key = own_ke_key
@@ -210,6 +224,7 @@ pub fn finish(
     );
 
     let salt_input = SaltInput {
+        source_version: imp.device.get_source_version(),
         sink_ke_pub_key: peer_pub_key,
         source_ke_pub_key: own_ke_pub_key,
         sink_ke_nonce: peer_nonce.clone(),
@@ -254,7 +269,7 @@ pub fn authentication_complete(
     imp: &mut TraitImpl,
     peer_sig: &[u8],
     shared_keys: [Vec<u8>; 2],
-) -> Result<KEAuthCompleteResult, Error> {
+) -> Result<[Vec<u8>; 2], Error> {
     let in_key_arc = &shared_keys[0];
     let out_key_arc = &shared_keys[1];
 
@@ -285,7 +300,7 @@ pub fn authentication_complete(
     let updated_shared_key_arcs =
         auth_complete_shared_key_arcs(in_key_arc_content, out_key_arc_content, imp)?;
 
-    Ok(KEAuthCompleteResult { shared_keys: updated_shared_key_arcs })
+    Ok(updated_shared_key_arcs)
 }
 
 fn decode_peer_info(
@@ -303,6 +318,21 @@ fn decode_peer_info(
         nonce.try_into().map_err(|e| ag_err!(InvalidPeerNonce, "invalid nonce size: {:?}", e))?,
     );
     Ok((pub_key, identity, nonce))
+}
+
+fn compute_shared_secret(
+    ecdh: &dyn EcDh,
+    own_key: &EcExchangeKeyPriv,
+    peer_key: &EcExchangeKeyPub,
+) -> Result<EcdhSecret, Error> {
+    check_cose_key_params(
+        &peer_key.0,
+        iana::KeyType::EC2,
+        iana::Algorithm::ECDH_ES_HKDF_256, // ECDH
+        iana::EllipticCurve::P_256,
+        ErrorCode::InvalidPeerKeKey,
+    )?;
+    ecdh.compute_shared_secret(own_key, peer_key)
 }
 
 fn compute_salt(salt_input: SaltInput, sha_256: &dyn Sha256) -> Result<[u8; 32], Error> {
@@ -358,8 +388,36 @@ fn verify_signature_on_session_id(
     signature: &[u8],
     ecdsa: &dyn EcDsa,
 ) -> Result<(), Error> {
-    // TOOD: check approrpriate parameters in `verify_key`
     let cose_sign1 = CoseSign1::from_slice(signature)?;
+    match verify_key {
+        EcVerifyKey::Ed25519(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::OKP,
+                iana::Algorithm::EdDSA,
+                iana::EllipticCurve::Ed25519,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+        EcVerifyKey::P256(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::EC2,
+                iana::Algorithm::ES256, // ECDSA
+                iana::EllipticCurve::P_256,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+        EcVerifyKey::P384(cose_key) => {
+            check_cose_key_params(
+                cose_key,
+                iana::KeyType::EC2,
+                iana::Algorithm::ES384,
+                iana::EllipticCurve::P_384,
+                ErrorCode::InvalidCertChain,
+            )?;
+        }
+    }
     cose_sign1.verify_detached_signature(session_id, &[], |signature, data| {
         ecdsa.verify_signature(verify_key, data, signature)
     })
@@ -405,7 +463,7 @@ fn create_shared_key_arcs(
     let in_encrypt_key_arc = arc::create_arc(
         &pbk,
         arc::ArcContent {
-            payload: in_encrypt_key.0.to_vec(),
+            payload: ArcPayload(in_encrypt_key.0.to_vec()),
             protected_headers: in_protected_headers,
             ..Default::default()
         },
@@ -426,7 +484,7 @@ fn create_shared_key_arcs(
     let out_encrypt_key_arc = arc::create_arc(
         &pbk,
         arc::ArcContent {
-            payload: out_encrypt_key.0.to_vec(),
+            payload: ArcPayload(out_encrypt_key.0.to_vec()),
             protected_headers: out_protected_headers,
             ..Default::default()
         },

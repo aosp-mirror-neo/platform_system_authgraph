@@ -2,9 +2,12 @@
 
 use authgraph_core::error::Error;
 use authgraph_core::key::{
-    AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Nonce12, PseudoRandKey,
+    AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Key, Nonce12, PseudoRandKey,
 };
-use authgraph_core::traits::{AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256};
+use authgraph_core::keyexchange;
+use authgraph_core::traits::{
+    AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256, TraitImpl,
+};
 use coset::{cbor::Value, iana, CoseKeyBuilder};
 
 /// Test basic [`Rng`] functionality.
@@ -442,4 +445,137 @@ fn test_ecdsa_round_trip<E: EcDsa>(ecdsa: &E, verify_key: &EcVerifyKey, sign_key
     let mut bad_sig = sig;
     bad_sig[0] ^= 0x01;
     assert!(ecdsa.verify_signature(verify_key, msg, &bad_sig).is_err());
+}
+
+/// Test `create` method of key exchange protocol
+pub fn test_key_exchange_create(imp: &mut TraitImpl) {
+    let create_result = keyexchange::create(imp);
+    assert!(create_result.is_ok());
+
+    // TODO: Add more tests on the values returned from `create` (some of these tests may
+    // need to be done in `libauthgraph_boringssl_test`)
+    // 1. dh_key is not None,
+    // 2. dh_key->pub key is in CoseKey encoding (e..g purpose)
+    // 3. dh_key->priv_key arc can be decrypted from the pbk from the AgDevice, the IV attached
+    //    in the unprotected headers, nonce for key exchange and the payload type = SecretKey
+    //    attached in the protected headers
+    // 5. identity decodes to a CBOR vector and the second element is a bstr of
+    //    CoseKey
+    // 6. nonce is same as the nonce attached in the protected header of the arc in
+    //    #3 above
+    // 7. ECDH can be performed from the dh_key returned from this method
+}
+
+/// Test `init` method of key exchange protocol
+pub fn test_key_exchange_init(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: peer_ke_pub_key, .. },
+        identity: peer_identity,
+        nonce: peer_nonce,
+        version: peer_version,
+    } = keyexchange::create(p1_imp).unwrap();
+
+    let init_result = keyexchange::init(
+        p2_imp,
+        &peer_ke_pub_key.unwrap(),
+        &peer_identity,
+        &peer_nonce,
+        peer_version,
+    );
+    assert!(init_result.is_ok())
+    // TODO: add more tests on init_result
+}
+
+/// Test `finish` method of key exchange protocol
+pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = keyexchange::create(p1_imp).unwrap();
+
+    let keyexchange::KEInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info: keyexchange::SessionInfo { session_id_signature: p2_signature, .. },
+    } = keyexchange::init(
+        p2_imp,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
+
+    let finish_result = keyexchange::finish(
+        p1_imp,
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    );
+    assert!(finish_result.is_ok())
+    // TODO: add more tests on finish_result
+}
+
+/// Test `authentication_complete` method of key exchange protocol
+pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = keyexchange::create(p1_imp).unwrap();
+
+    let keyexchange::KEInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = keyexchange::init(
+        p2_imp,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = keyexchange::finish(
+        p1_imp,
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    )
+    .unwrap();
+
+    let auth_complete_result =
+        keyexchange::authentication_complete(p2_imp, &p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+    // TODO: add more tests on finish_result, and encrypt/decrypt using the agreed keys
 }
