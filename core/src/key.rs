@@ -15,15 +15,18 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
+use crate::ag_verr;
+use crate::error::{Error, ErrorCode};
 use crate::traits::Rng;
 use crate::FallibleAllocExt;
 use alloc::vec::Vec;
 use coset::{
-    cbor::value::Value, iana::Algorithm, AsCborValue, CborSerializable, CoseError, CoseKey,
+    cbor, cbor::value::Value, iana, AsCborValue, CborSerializable, CoseError, CoseKey, Label,
 };
+use zeroize::ZeroizeOnDrop;
 
 /// AES key of 256 bits
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct AesKey(pub [u8; 32]);
 
 /// Size (in bytes) of a curve 25519 private key.
@@ -52,12 +55,15 @@ pub struct EcExchangeKeyPub(pub CoseKey);
 
 /// Private key of an EC key pair created for ECDH.
 /// It is up to the implementers of the AuthGraph traits to decide how to encode the private key.
+#[derive(ZeroizeOnDrop)]
 pub struct EcExchangeKeyPriv(pub Vec<u8>);
 
 /// Shared secret agreed via ECDH
+#[derive(ZeroizeOnDrop)]
 pub struct EcdhSecret(pub Vec<u8>);
 
 /// Pseudo random key of 256 bits that is output by extract/expand functions of key derivation
+#[derive(ZeroizeOnDrop)]
 pub struct PseudoRandKey(pub [u8; 32]);
 
 /// A nonce of 16 bytes, used for key exchange
@@ -89,7 +95,7 @@ impl Nonce12 {
 pub struct MillisecondsSinceEpoch(pub i64);
 
 /// Variants of EC private key used to create signature
-#[derive(Clone)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub enum EcSignKey {
     /// On curve Ed25519
     Ed25519([u8; CURVE25519_PRIV_KEY_LEN]),
@@ -123,16 +129,17 @@ impl EcVerifyKey {
     /// Return the Cose signing algorithm corresponds to the given public signing key.
     /// Assume that the `CoseKey` is checked for appropriate header parameters before it is used for
     /// signature verification.
-    pub fn get_cose_sign_algorithm(&self) -> Algorithm {
+    pub fn get_cose_sign_algorithm(&self) -> iana::Algorithm {
         match *self {
-            EcVerifyKey::Ed25519(_) => Algorithm::EdDSA,
-            EcVerifyKey::P256(_) => Algorithm::ES256,
-            EcVerifyKey::P384(_) => Algorithm::ES384,
+            EcVerifyKey::Ed25519(_) => iana::Algorithm::EdDSA,
+            EcVerifyKey::P256(_) => iana::Algorithm::ES256,
+            EcVerifyKey::P384(_) => iana::Algorithm::ES384,
         }
     }
 }
 
 /// HMAC key of 256 bits
+#[derive(ZeroizeOnDrop)]
 pub struct HmacKey(pub [u8; 32]);
 
 /// Identity of an AuthGraph participant. The CDDL is listed in hardware/interfaces/security/
@@ -198,6 +205,7 @@ pub struct Key {
 /// The structure containing the inputs for the `salt` used in extracting a pseudo random key
 /// from the Diffie-Hellman secret.
 /// salt = bstr .cbor [
+///     source_version:    int,
 ///     sink_ke_pub_key:   bstr .cbor PlainPubKey,
 ///     source_ke_pub_key: bstr .cbor PlainPubKey,
 ///     sink_ke_nonce:     bstr .size 16,
@@ -206,6 +214,8 @@ pub struct Key {
 ///     source_cert_chain: bstr .cbor ExplicitKeyDiceCertChain,
 /// ]
 pub struct SaltInput {
+    /// Version advertised by the source (P1).
+    pub source_version: i32,
     /// Public key from sink for key exchange
     pub sink_ke_pub_key: EcExchangeKeyPub,
     /// Public key from source for ke exchange
@@ -315,7 +325,8 @@ impl AsCborValue for SaltInput {
 
     fn to_cbor_value(self) -> Result<Value, CoseError> {
         let mut array = Vec::<Value>::new();
-        array.try_reserve(6).map_err(|_| CoseError::EncodeFailed)?;
+        array.try_reserve(7).map_err(|_| CoseError::EncodeFailed)?;
+        array.push(Value::Integer(self.source_version.into()));
         array.push(Value::Bytes(self.sink_ke_pub_key.0.to_vec()?));
         array.push(Value::Bytes(self.source_ke_pub_key.0.to_vec()?));
         array.push(Value::Bytes(self.sink_ke_nonce.0.to_vec()));
@@ -344,3 +355,33 @@ impl AsCborValue for SessionIdInput {
 }
 
 impl CborSerializable for SessionIdInput {}
+
+/// Given a `CoseKey` and the set of expected parameters, check if the `CoseKey` contains them.
+pub fn check_cose_key_params(
+    cose_key: &coset::CoseKey,
+    want_kty: iana::KeyType,
+    want_alg: iana::Algorithm,
+    want_curve: iana::EllipticCurve,
+    err_code: ErrorCode,
+) -> Result<(), Error> {
+    if cose_key.kty != coset::KeyType::Assigned(want_kty) {
+        return Err(ag_verr!(err_code, "invalid kty {:?}, expect {want_kty:?}", cose_key.kty));
+    }
+    if cose_key.alg != Some(coset::Algorithm::Assigned(want_alg)) {
+        return Err(ag_verr!(err_code, "invalid alg {:?}, expect {want_alg:?}", cose_key.alg));
+    }
+    let curve = cose_key
+        .params
+        .iter()
+        .find_map(|(l, v)| match (l, v) {
+            (Label::Int(l), Value::Integer(v)) if *l == iana::Ec2KeyParameter::Crv as i64 => {
+                Some(*v)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| ag_verr!(err_code, "no curve"))?;
+    if curve != cbor::value::Integer::from(want_curve as u64) {
+        return Err(ag_verr!(err_code, "invalid curve {curve:?}, expect {want_curve:?}"));
+    }
+    Ok(())
+}
