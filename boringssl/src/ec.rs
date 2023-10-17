@@ -19,11 +19,14 @@
 use authgraph_core::{
     ag_err, ag_verr,
     error::{Error, ErrorCode},
-    key::{EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey, EcdhSecret},
+    key::{
+        check_cose_key_params, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey,
+        EcVerifyKey, EcdhSecret,
+    },
     traits, try_to_vec,
 };
 use core::ops::DerefMut;
-use coset::{cbor, cbor::Value, iana, Label};
+use coset::{cbor::Value, iana, CoseKey, Label};
 
 /// Initial byte of SEC1 public key encoding that indicates an uncompressed point.
 pub const SEC1_UNCOMPRESSED_PREFIX: u8 = 0x04;
@@ -33,26 +36,7 @@ pub struct BoringEcDh;
 
 impl traits::EcDh for BoringEcDh {
     fn generate_key(&self) -> Result<EcExchangeKey, Error> {
-        let group =
-            ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1))?;
-        let ec_priv_key = ossl!(openssl::ec::EcKey::<openssl::pkey::Private>::generate(&group))?;
-        // Convert the private key to DER-encoded `ECPrivateKey` as per RFC5915 s3, which is
-        // our choice of private key encoding.
-        let priv_key = ossl!(ec_priv_key.private_key_to_der())?;
-
-        // Get the public key point, and convert to (x, y) coordinates.
-        let pub_key_pt = ec_priv_key.public_key();
-        let mut bn_ctx = ossl!(openssl::bn::BigNumContext::new())?;
-        let pub_key_sec1 = ossl!(pub_key_pt.to_bytes(
-            group.as_ref(),
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            bn_ctx.deref_mut()
-        ))?;
-        let (x, y) = coords_from_p256_pub_key(&pub_key_sec1)?;
-
-        let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(iana::EllipticCurve::P_256, x, y)
-            .algorithm(iana::Algorithm::ECDH_ES_HKDF_256)
-            .build();
+        let (priv_key, pub_key) = create_p256_key_pair(iana::Algorithm::ECDH_ES_HKDF_256)?;
 
         Ok(EcExchangeKey {
             priv_key: EcExchangeKeyPriv(priv_key),
@@ -149,6 +133,30 @@ impl traits::EcDsa for BoringEcDsa {
     }
 }
 
+/// Create an EC key pair on P-256 curve and return a tuple consisting of the private key bytes
+/// and the public key as a `CoseKey`.
+pub fn create_p256_key_pair(algorithm: iana::Algorithm) -> Result<(Vec<u8>, CoseKey), Error> {
+    let group = ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1))?;
+    let ec_priv_key = ossl!(openssl::ec::EcKey::<openssl::pkey::Private>::generate(&group))?;
+    // Convert the private key to DER-encoded `ECPrivateKey` as per RFC5915 s3, which is
+    // our choice of private key encoding.
+    let priv_key = ossl!(ec_priv_key.private_key_to_der())?;
+
+    // Get the public key point, and convert to (x, y) coordinates.
+    let pub_key_pt = ec_priv_key.public_key();
+    let mut bn_ctx = ossl!(openssl::bn::BigNumContext::new())?;
+    let pub_key_sec1 = ossl!(pub_key_pt.to_bytes(
+        group.as_ref(),
+        openssl::ec::PointConversionForm::UNCOMPRESSED,
+        bn_ctx.deref_mut()
+    ))?;
+    let (x, y) = crate::ec::coords_from_p256_pub_key(&pub_key_sec1)?;
+    let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(iana::EllipticCurve::P_256, x, y)
+        .algorithm(algorithm)
+        .build();
+    Ok((priv_key, pub_key))
+}
+
 /// Helper function to return the (x,y) coordinates, given the public key as a SEC-1 encoded
 /// uncompressed point. 0x04: uncompressed, followed by x || y coordinates.
 pub fn coords_from_p256_pub_key(pub_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
@@ -212,35 +220,6 @@ fn p384_ecdsa_pkey_from_cose(
     )
 }
 
-fn check_cose_params(
-    cose_key: &coset::CoseKey,
-    want_kty: iana::KeyType,
-    want_alg: iana::Algorithm,
-    want_curve: iana::EllipticCurve,
-    err_code: ErrorCode,
-) -> Result<(), Error> {
-    if cose_key.kty != coset::KeyType::Assigned(want_kty) {
-        return Err(ag_verr!(err_code, "invalid kty {:?}, expect {want_kty:?}", cose_key.kty));
-    }
-    if cose_key.alg != Some(coset::Algorithm::Assigned(want_alg)) {
-        return Err(ag_verr!(err_code, "invalid alg {:?}, expect {want_alg:?}", cose_key.alg));
-    }
-    let curve = cose_key
-        .params
-        .iter()
-        .find_map(|(l, v)| match (l, v) {
-            (Label::Int(l), Value::Integer(v)) if *l == iana::Ec2KeyParameter::Crv as i64 => {
-                Some(*v)
-            }
-            _ => None,
-        })
-        .ok_or_else(|| ag_verr!(err_code, "no curve"))?;
-    if curve != cbor::value::Integer::from(want_curve as u64) {
-        return Err(ag_verr!(err_code, "invalid curve {curve:?}, expect {want_curve:?}"));
-    }
-    Ok(())
-}
-
 fn nist_pkey_from_cose(
     cose_key: &coset::CoseKey,
     want_kty: iana::KeyType,
@@ -250,8 +229,7 @@ fn nist_pkey_from_cose(
     err_code: ErrorCode,
 ) -> Result<openssl::pkey::PKey<openssl::pkey::Public>, Error> {
     // First check that the COSE_Key looks sensible.
-    check_cose_params(cose_key, want_kty, want_alg, want_curve, err_code)?;
-
+    check_cose_key_params(cose_key, want_kty, want_alg, want_curve, err_code)?;
     // Extract (x, y) coordinates (big-endian).
     let x = cose_key
         .params
@@ -287,14 +265,13 @@ fn ed25519_ecdsa_pkey_from_cose(
     cose_key: &coset::CoseKey,
 ) -> Result<openssl::pkey::PKey<openssl::pkey::Public>, Error> {
     // First check that the COSE_Key looks sensible.
-    check_cose_params(
+    check_cose_key_params(
         cose_key,
         iana::KeyType::OKP,
         iana::Algorithm::EdDSA,
         iana::EllipticCurve::Ed25519,
         ErrorCode::InvalidCertChain,
     )?;
-
     // Extract x coordinate (little-endian).
     let x = cose_key
         .params

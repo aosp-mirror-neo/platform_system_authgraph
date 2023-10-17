@@ -52,6 +52,7 @@ mod hmac;
 pub use hmac::{BoringHkdf, BoringHmac, BoringSha256};
 mod rng;
 pub use rng::BoringRng;
+mod test_device;
 
 #[cfg(test)]
 mod tests;
