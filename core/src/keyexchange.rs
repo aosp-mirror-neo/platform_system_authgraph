@@ -43,6 +43,7 @@ pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_SECOND_ENCRYPTION_KEY";
 pub const CONTEXT_KE_HMAC_KEY: &[u8] = b"KE_HMAC_KEY";
 
 /// Return type of the `create` method.
+#[derive(Debug)]
 pub struct SessionInitiationInfo {
     /// An EC key created for ECDH
     pub ke_key: Key,
@@ -56,6 +57,7 @@ pub struct SessionInitiationInfo {
 
 /// Session information returned as part of the authenticated key exchange.
 /// Return type of the `finish` method.
+#[derive(Debug)]
 pub struct SessionInfo {
     /// Two arcs created by encrypting the two shared encryption keys:
     /// i) encryption key for the incoming messages
@@ -69,7 +71,8 @@ pub struct SessionInfo {
 }
 
 /// Return type of the `init` method.
-pub struct KEInitResult {
+#[derive(Debug)]
+pub struct KeInitResult {
     /// Session initiation info
     pub session_init_info: SessionInitiationInfo,
     /// Session info
@@ -126,7 +129,7 @@ pub fn init(
     peer_id: &[u8],
     peer_nonce: &[u8],
     peer_version: i32,
-) -> Result<KEInitResult, Error> {
+) -> Result<KeInitResult, Error> {
     if imp.device.get_sink_version(peer_version) > peer_version {
         ag_err!(InternalError, "protocol version is greater than peer's version");
     }
@@ -171,7 +174,7 @@ pub fn init(
         imp,
     )?;
 
-    Ok(KEInitResult {
+    Ok(KeInitResult {
         session_init_info: SessionInitiationInfo {
             ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
             identity: own_identity.to_vec()?,
