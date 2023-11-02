@@ -495,7 +495,7 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
         version: p1_version,
     } = keyexchange::create(p1_imp).unwrap();
 
-    let keyexchange::KEInitResult {
+    let keyexchange::KeInitResult {
         session_init_info:
             keyexchange::SessionInitiationInfo {
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
@@ -535,7 +535,7 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
         version: p1_version,
     } = keyexchange::create(p1_imp).unwrap();
 
-    let keyexchange::KEInitResult {
+    let keyexchange::KeInitResult {
         session_init_info:
             keyexchange::SessionInitiationInfo {
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
