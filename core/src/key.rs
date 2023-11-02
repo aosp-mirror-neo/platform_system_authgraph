@@ -194,6 +194,7 @@ pub enum IdentityVerificationDecision {
 /// General representation of a key. If the key is a symmetric key, it is encrypted in an arc where
 /// the encryption key is the per-boot key. If it is an asymmetric key, public key is included along
 /// with the private key encrypted an arc from the per-boot-key.
+#[derive(Debug)]
 pub struct Key {
     /// Public key, as a CBOR encoded COSE key [RFC9052 s7]
     pub pub_key: Option<Vec<u8>>,
