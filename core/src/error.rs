@@ -45,12 +45,12 @@ pub enum ErrorCode {
     InvalidSharedKeyArcs = -9,
     /// Memory allocation failed
     MemoryAllocationFailed = -10,
-    /// Internal processing error
-    InternalError = -11,
-    /// Unimplemented
-    Unimplemented = -12,
     /// The protocol version negotiated with the sink is incompatible
-    IncompatibleProtocolVersion = -13,
+    IncompatibleProtocolVersion = -11,
+    /// Internal processing error
+    InternalError = -12,
+    /// Unimplemented
+    Unimplemented = -13,
 }
 
 /// AuthGraph error type.
