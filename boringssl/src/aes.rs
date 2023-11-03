@@ -18,11 +18,12 @@
 use crate::ossl;
 use authgraph_core::{
     ag_err,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{AesKey, Nonce12},
     traits::AesGcm,
     vec_try, FallibleAllocExt,
 };
+use authgraph_wire::ErrorCode;
 use openssl::symm::{Cipher, Crypter, Mode};
 
 /// Tag size for AES-GCM-256.

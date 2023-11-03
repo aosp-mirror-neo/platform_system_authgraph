@@ -25,7 +25,7 @@ rust_library {
         "authgraph_use_latest_hal_aidl_rust",
     ],
     rustlibs: [
-        "libauthgraph_core",
+        "libauthgraph_wire",
         "libbinder_rs",
         "liblog_rust",
     ],
