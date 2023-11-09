@@ -171,7 +171,8 @@ pub fn finish(
         &pbk,
         &own_ke_key.arc_from_pbk.ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
         &*imp.aes_gcm,
-    )?;
+    )
+    .map_err(|e| ag_err!(InvalidPrivKeyArcInKey, "failed to decrypt arc: {e:?}"))?;
 
     let own_ke_nonce = extract_nonce(&own_ke_key_arc_content.protected_headers)?;
 
@@ -245,11 +246,15 @@ pub fn authentication_complete(
 
     let pbk = imp.device.get_per_boot_key()?;
 
-    let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*imp.aes_gcm)?;
+    let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*imp.aes_gcm).map_err(|e| {
+        ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+    })?;
     let (in_session_id, in_source_identity) =
         process_shared_key_arc_headers(&in_key_arc_content.protected_headers)?;
 
-    let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*imp.aes_gcm)?;
+    let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*imp.aes_gcm).map_err(|e| {
+        ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+    })?;
     let (out_session_id, out_source_identity) =
         process_shared_key_arc_headers(&out_key_arc_content.protected_headers)?;
 
