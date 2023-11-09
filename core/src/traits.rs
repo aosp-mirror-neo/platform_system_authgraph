@@ -16,7 +16,7 @@
 
 //! Traits representing crypto abstractions and device specific functionality.
 use crate::ag_err;
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
 use crate::key::{
     AesKey, CertChain, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
     EcdhSecret, HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
@@ -24,6 +24,7 @@ use crate::key::{
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use authgraph_wire::ErrorCode;
 use coset::iana::Algorithm;
 
 /// The first version of the AuthGraph key exchange protocol
