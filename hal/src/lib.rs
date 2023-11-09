@@ -25,6 +25,9 @@ use android_hardware_security_authgraph::aidl::android::hardware::security::auth
 use authgraph_wire as wire;
 use log::warn;
 
+pub mod channel;
+pub mod service;
+
 // Neither the AIDL types nor the `authgraph_core` types are local to this crate, which means that
 // Rust's orphan rule means we cannot implement the standard conversion traits.  So instead define
 // our own equivalent conversion traits that are local, and for which we're allowed to provide
