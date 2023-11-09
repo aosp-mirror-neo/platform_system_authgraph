@@ -23,6 +23,7 @@ rust_library {
     host_supported: true,
     vendor_available: true,
     rustlibs: [
+        "libauthgraph_wire",
         "libcoset",
         "libzeroize",
     ],
