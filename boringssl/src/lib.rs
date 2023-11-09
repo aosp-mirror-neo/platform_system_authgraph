@@ -37,7 +37,7 @@ extern crate alloc; // Needed for use of `ag_err!` from `authgraph_core`
 macro_rules! ossl {
     { $e:expr } => {
         $e.map_err(|err| authgraph_core::error::Error(
-            authgraph_core::error::ErrorCode::InternalError,
+            authgraph_wire::ErrorCode::InternalError,
             format!(concat!("failed to perform: ", stringify!($e), ": {:?}"), err)
         ))
     }

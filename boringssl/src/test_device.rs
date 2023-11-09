@@ -18,13 +18,14 @@
 
 use authgraph_core::{
     ag_err,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{
         AesKey, CertChain, EcSignKey, EcVerifyKey, Identity, IdentityVerificationDecision,
         EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION, IDENTITY_VERSION,
     },
     traits,
 };
+use authgraph_wire::ErrorCode;
 use core::cell::RefCell;
 use coset::iana;
 
