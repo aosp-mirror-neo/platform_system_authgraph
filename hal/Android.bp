@@ -27,6 +27,8 @@ rust_library {
     rustlibs: [
         "libauthgraph_wire",
         "libbinder_rs",
+        "libciborium",
+        "libciborium_io",
         "liblog_rust",
     ],
 }
