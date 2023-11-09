@@ -16,14 +16,18 @@
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
 use crate::ag_verr;
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
 use crate::traits::Rng;
 use crate::FallibleAllocExt;
 use alloc::vec::Vec;
+use authgraph_wire as wire;
 use coset::{
     cbor, cbor::value::Value, iana, AsCborValue, CborSerializable, CoseError, CoseKey, Label,
 };
+use wire::ErrorCode;
 use zeroize::ZeroizeOnDrop;
+
+pub use wire::Key;
 
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
@@ -189,18 +193,6 @@ pub enum IdentityVerificationDecision {
     /// The latest certificate chain is allowed by the identity verification policy and the identity
     /// owner is updated
     Updated,
-}
-
-/// General representation of a key. If the key is a symmetric key, it is encrypted in an arc where
-/// the encryption key is the per-boot key. If it is an asymmetric key, public key is included along
-/// with the private key encrypted an arc from the per-boot-key.
-#[derive(Debug)]
-pub struct Key {
-    /// Public key, as a CBOR encoded COSE key [RFC9052 s7]
-    pub pub_key: Option<Vec<u8>>,
-    /// Secret key encrypted in an arc from the per-boot key. The CDDL of an arc is listed in
-    /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/Arc.cddl
-    pub arc_from_pbk: Option<Vec<u8>>,
 }
 
 /// The structure containing the inputs for the `salt` used in extracting a pseudo random key

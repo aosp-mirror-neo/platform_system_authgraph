@@ -18,13 +18,14 @@
 
 use authgraph_core::{
     ag_err, ag_verr,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{
         check_cose_key_params, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey,
         EcVerifyKey, EcdhSecret,
     },
     traits, try_to_vec,
 };
+use authgraph_wire::ErrorCode;
 use core::ops::DerefMut;
 use coset::{cbor::Value, iana, CoseKey, Label};
 
