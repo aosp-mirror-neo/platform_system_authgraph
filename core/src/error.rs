@@ -17,41 +17,8 @@
 //! Error Handling
 
 use alloc::string::String;
+use authgraph_wire::ErrorCode;
 use coset::CoseError;
-
-/// AuthGraph error codes from the AIDL definition.
-#[derive(Clone, Copy, Debug)]
-#[repr(i32)]
-pub enum ErrorCode {
-    /// Success
-    Ok = 0,
-    /// Invalid peer nonce for key agreement
-    InvalidPeerNonce = -1,
-    /// Invalid key agreement public key by the peer
-    InvalidPeerKeKey = -2,
-    /// Invalid identity of the peer
-    InvalidIdentity = -3,
-    /// Invalid certificate chain in the identity of the peer
-    InvalidCertChain = -4,
-    /// Invalid signature by the peer
-    InvalidSignature = -5,
-    /// Invalid key agreement key created by a particular party themselves to be used as a handle
-    InvalidKeKey = -6,
-    /// Invalid public key in the `Key` struct
-    InvalidPubKeyInKey = -7,
-    /// Invalid private key arc in the `Key` struct
-    InvalidPrivKeyArcInKey = -8,
-    /// Invalid shared key arcs
-    InvalidSharedKeyArcs = -9,
-    /// Memory allocation failed
-    MemoryAllocationFailed = -10,
-    /// The protocol version negotiated with the sink is incompatible
-    IncompatibleProtocolVersion = -11,
-    /// Internal processing error
-    InternalError = -12,
-    /// Unimplemented
-    Unimplemented = -13,
-}
 
 /// AuthGraph error type.
 #[derive(Debug)]

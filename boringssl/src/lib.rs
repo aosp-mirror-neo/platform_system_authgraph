@@ -19,6 +19,8 @@
 
 extern crate alloc; // Needed for use of `ag_err!` from `authgraph_core`
 
+use authgraph_core::traits;
+
 /// Macro to auto-generate error mapping around invocations of `openssl` methods.
 /// An invocation like:
 ///
@@ -37,7 +39,7 @@ extern crate alloc; // Needed for use of `ag_err!` from `authgraph_core`
 macro_rules! ossl {
     { $e:expr } => {
         $e.map_err(|err| authgraph_core::error::Error(
-            authgraph_core::error::ErrorCode::InternalError,
+            authgraph_wire::ErrorCode::InternalError,
             format!(concat!("failed to perform: ", stringify!($e), ": {:?}"), err)
         ))
     }
@@ -56,3 +58,22 @@ pub mod test_device;
 
 #[cfg(test)]
 mod tests;
+
+/// Return a populated [`traits::TraitImpl`] structure that uses BoringSSL implementations for
+/// cryptographic traits.
+pub fn trait_impls(
+    device: Box<dyn traits::Device>,
+    clock: Option<Box<dyn traits::MonotonicClock>>,
+) -> authgraph_core::traits::TraitImpl {
+    traits::TraitImpl {
+        aes_gcm: Box::new(BoringAes),
+        ecdh: Box::new(BoringEcDh),
+        ecdsa: Box::new(BoringEcDsa),
+        hmac: Box::new(BoringHmac),
+        hkdf: Box::new(BoringHkdf),
+        sha256: Box::new(BoringSha256),
+        rng: Box::new(BoringRng),
+        device,
+        clock,
+    }
+}

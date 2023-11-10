@@ -19,7 +19,7 @@
 use crate::{
     ag_err, arc,
     arc::ArcPayload,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{
         check_cose_key_params, AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub,
         EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey,
@@ -29,11 +29,15 @@ use crate::{
     try_to_vec, FallibleAllocExt,
 };
 use alloc::vec::Vec;
+use authgraph_wire as wire;
 use core::mem::take;
 use coset::{
     cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
 };
+use wire::ErrorCode;
+
+pub use wire::{KeInitResult, SessionInfo, SessionInitiationInfo};
 
 /// Context for deriving the first shared encryption key
 pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_FIRST_ENCRYPTION_KEY";
@@ -41,43 +45,6 @@ pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_FIRST_ENCRYPTION_KEY";
 pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_SECOND_ENCRYPTION_KEY";
 /// Context for deriving the shared HMAC key
 pub const CONTEXT_KE_HMAC_KEY: &[u8] = b"KE_HMAC_KEY";
-
-/// Return type of the `create` method.
-#[derive(Debug)]
-pub struct SessionInitiationInfo {
-    /// An EC key created for ECDH
-    pub ke_key: Key,
-    /// CBOR encoded `Identity` of the party who creates the `ke_key`
-    pub identity: Vec<u8>,
-    /// The nonce created by the party who creates the `ke_key`
-    pub nonce: Vec<u8>,
-    /// The protocol version - to prevent protocol downgrade attacks.
-    pub version: i32,
-}
-
-/// Session information returned as part of the authenticated key exchange.
-/// Return type of the `finish` method.
-#[derive(Debug)]
-pub struct SessionInfo {
-    /// Two arcs created by encrypting the two shared encryption keys:
-    /// i) encryption key for the incoming messages
-    /// ii) encryption key for the outgoing messages
-    pub shared_keys: [Vec<u8>; 2],
-    /// Session id computed by concatenating the nonces and computing HMAC over it using the shared
-    /// HMAC key
-    pub session_id: Vec<u8>,
-    /// The signature over the session id in `CoseSign1` format.
-    pub session_id_signature: Vec<u8>,
-}
-
-/// Return type of the `init` method.
-#[derive(Debug)]
-pub struct KeInitResult {
-    /// Session initiation info
-    pub session_init_info: SessionInitiationInfo,
-    /// Session info
-    pub session_info: SessionInfo,
-}
 
 /// Enum defining the roles played by the two AuthGraph participants
 pub enum Role {
@@ -204,7 +171,8 @@ pub fn finish(
         &pbk,
         &own_ke_key.arc_from_pbk.ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
         &*imp.aes_gcm,
-    )?;
+    )
+    .map_err(|e| ag_err!(InvalidPrivKeyArcInKey, "failed to decrypt arc: {e:?}"))?;
 
     let own_ke_nonce = extract_nonce(&own_ke_key_arc_content.protected_headers)?;
 
@@ -278,11 +246,15 @@ pub fn authentication_complete(
 
     let pbk = imp.device.get_per_boot_key()?;
 
-    let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*imp.aes_gcm)?;
+    let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*imp.aes_gcm).map_err(|e| {
+        ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+    })?;
     let (in_session_id, in_source_identity) =
         process_shared_key_arc_headers(&in_key_arc_content.protected_headers)?;
 
-    let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*imp.aes_gcm)?;
+    let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*imp.aes_gcm).map_err(|e| {
+        ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+    })?;
     let (out_session_id, out_source_identity) =
         process_shared_key_arc_headers(&out_key_arc_content.protected_headers)?;
 
@@ -385,7 +357,8 @@ fn compute_sign_session_id(
     Ok((session_id, cose_sign1.to_vec()?))
 }
 
-fn verify_signature_on_session_id(
+/// Verify the signature in a CBOR-encoded `COSE_Sign1` with detached payload `session_id`.
+pub fn verify_signature_on_session_id(
     verify_key: &EcVerifyKey,
     session_id: &[u8],
     signature: &[u8],
