@@ -24,6 +24,7 @@ rust_defaults {
     vendor_available: true,
     rustlibs: [
         "libauthgraph_core",
+        "libauthgraph_wire",
         "libcoset",
         "libopenssl",
         "libzeroize",

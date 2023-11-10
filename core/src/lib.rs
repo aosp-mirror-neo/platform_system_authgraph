@@ -24,6 +24,7 @@ pub mod arc;
 pub mod error;
 pub mod key;
 pub mod keyexchange;
+pub mod ta;
 pub mod traits;
 
 /// Extension trait to provide fallible-allocation variants of `Vec` methods.
