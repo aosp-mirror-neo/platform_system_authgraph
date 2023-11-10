@@ -16,7 +16,7 @@
 
 //! Implementation of an AuthGraph trusted application (TA).
 
-use crate::{ag_err, error::Error, keyexchange, traits};
+use crate::{ag_err, error::Error, keyexchange};
 use alloc::vec::Vec;
 use authgraph_wire as wire;
 use log::{debug, error, trace, warn};
@@ -55,14 +55,14 @@ impl Role {
 
 /// AuthGraph trusted application instance.
 pub struct AuthGraphTa {
-    imp: traits::TraitImpl,
+    ag_participant: keyexchange::AuthGraphParticipant,
     role: Role,
 }
 
 impl AuthGraphTa {
     /// Create a TA instance using the provided trait implementations.
-    pub fn new(imp: traits::TraitImpl, role: Role) -> Self {
-        Self { imp, role }
+    pub fn new(ag_participant: keyexchange::AuthGraphParticipant, role: Role) -> Self {
+        Self { ag_participant, role }
     }
 
     /// Process a single serialized request, returning a serialized response.
@@ -131,7 +131,7 @@ impl AuthGraphTa {
             return Err(ag_err!(Unimplemented, "create() invoked on non-source"));
         }
         debug!("create()");
-        keyexchange::create(&mut self.imp)
+        self.ag_participant.create()
     }
     fn init(
         &mut self,
@@ -144,7 +144,7 @@ impl AuthGraphTa {
             return Err(ag_err!(Unimplemented, "init() invoked on non-sink"));
         }
         debug!("init()");
-        keyexchange::init(&mut self.imp, peer_pub_key, peer_id, peer_nonce, peer_version)
+        self.ag_participant.init(peer_pub_key, peer_id, peer_nonce, peer_version)
     }
     fn finish(
         &mut self,
@@ -159,8 +159,7 @@ impl AuthGraphTa {
             return Err(ag_err!(Unimplemented, "finish() invoked on non-source"));
         }
         debug!("finish()");
-        keyexchange::finish(
-            &mut self.imp,
+        self.ag_participant.finish(
             peer_pub_key,
             peer_id,
             peer_signature,
@@ -178,7 +177,7 @@ impl AuthGraphTa {
             return Err(ag_err!(Unimplemented, "auth_complete() invoked on non-sink"));
         }
         debug!("auth_complete()");
-        keyexchange::authentication_complete(&mut self.imp, peer_signature, shared_keys)
+        self.ag_participant.authentication_complete(peer_signature, shared_keys)
     }
 }
 
