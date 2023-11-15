@@ -22,8 +22,11 @@ use android_hardware_security_authgraph::aidl::android::hardware::security::auth
     PubKey::PubKey, SessionIdSignature::SessionIdSignature, SessionInfo::SessionInfo,
     SessionInitiationInfo::SessionInitiationInfo,
 };
-use authgraph_core::{key, keyexchange as ke};
+use authgraph_wire as wire;
 use log::warn;
+
+pub mod channel;
+pub mod service;
 
 // Neither the AIDL types nor the `authgraph_core` types are local to this crate, which means that
 // Rust's orphan rule means we cannot implement the standard conversion traits.  So instead define
@@ -76,8 +79,8 @@ where
 
 // Conversions from internal types to HAL-defined types.
 
-impl Fromm<ke::SessionInitiationInfo> for SessionInitiationInfo {
-    fn fromm(val: ke::SessionInitiationInfo) -> Self {
+impl Fromm<wire::SessionInitiationInfo> for SessionInitiationInfo {
+    fn fromm(val: wire::SessionInitiationInfo) -> Self {
         Self {
             key: val.ke_key.innto(),
             identity: Identity { identity: val.identity },
@@ -87,8 +90,8 @@ impl Fromm<ke::SessionInitiationInfo> for SessionInitiationInfo {
     }
 }
 
-impl Fromm<key::Key> for Key {
-    fn fromm(val: key::Key) -> Self {
+impl Fromm<wire::Key> for Key {
+    fn fromm(val: wire::Key) -> Self {
         Self {
             pubKey: val
                 .pub_key
@@ -98,8 +101,8 @@ impl Fromm<key::Key> for Key {
     }
 }
 
-impl Fromm<ke::KeInitResult> for KeInitResult {
-    fn fromm(val: ke::KeInitResult) -> Self {
+impl Fromm<wire::KeInitResult> for KeInitResult {
+    fn fromm(val: wire::KeInitResult) -> Self {
         Self {
             sessionInitiationInfo: val.session_init_info.innto(),
             sessionInfo: val.session_info.innto(),
@@ -107,8 +110,8 @@ impl Fromm<ke::KeInitResult> for KeInitResult {
     }
 }
 
-impl Fromm<ke::SessionInfo> for SessionInfo {
-    fn fromm(val: ke::SessionInfo) -> Self {
+impl Fromm<wire::SessionInfo> for SessionInfo {
+    fn fromm(val: wire::SessionInfo) -> Self {
         Self {
             sharedKeys: val.shared_keys.map(|arc| Arc { arc }),
             sessionId: val.session_id,
@@ -119,7 +122,7 @@ impl Fromm<ke::SessionInfo> for SessionInfo {
 
 // Conversions from HAL-defined types to internal types.
 
-impl TryFromm<Key> for key::Key {
+impl TryFromm<Key> for wire::Key {
     type Error = binder::Status;
     fn try_fromm(aidl: Key) -> Result<Self, Self::Error> {
         let pub_key = match aidl.pubKey {
@@ -139,23 +142,18 @@ fn arg_err(msg: &str) -> binder::Status {
     )
 }
 
-/// Convert an error from the AuthGraph core library into a binder error.
-pub fn err_to_binder(err: authgraph_core::error::Error) -> binder::Status {
+/// Convert a [`wire::ErrorCore`] into a binder error.
+pub fn errcode_to_binder(err: wire::ErrorCode) -> binder::Status {
     warn!("operation failed: {err:?}");
     // Translate the internal errors for `Unimplemented` and `InternalError` to their counterparts
     // in binder errors to have uniformity in the Android HAL layer
-    match err.0 {
-        authgraph_core::error::ErrorCode::Unimplemented => binder::Status::new_exception(
-            binder::ExceptionCode::UNSUPPORTED_OPERATION,
-            Some(&std::ffi::CString::new(err.1).unwrap()),
-        ),
-        authgraph_core::error::ErrorCode::InternalError => binder::Status::new_exception(
-            binder::ExceptionCode::SERVICE_SPECIFIC,
-            Some(&std::ffi::CString::new(err.1).unwrap()),
-        ),
-        _ => binder::Status::new_service_specific_error(
-            err.0 as i32,
-            std::ffi::CString::new(err.1).ok().as_deref(),
-        ),
+    match err {
+        wire::ErrorCode::Unimplemented => {
+            binder::Status::new_exception(binder::ExceptionCode::UNSUPPORTED_OPERATION, None)
+        }
+        wire::ErrorCode::InternalError => {
+            binder::Status::new_exception(binder::ExceptionCode::SERVICE_SPECIFIC, None)
+        }
+        _ => binder::Status::new_service_specific_error(err as i32, None),
     }
 }

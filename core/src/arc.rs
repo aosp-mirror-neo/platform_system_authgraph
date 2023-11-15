@@ -18,12 +18,13 @@
 
 use crate::{
     ag_err,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{AesKey, Identity, Nonce12},
     traits::{AesGcm, Rng},
     try_to_vec, FallibleAllocExt,
 };
 use alloc::vec::Vec;
+use authgraph_wire::ErrorCode;
 use coset::{
     cbor::value::Value, iana, AsCborValue, CborSerializable, CoseEncrypt0, CoseEncrypt0Builder,
     CoseError, HeaderBuilder, Label,

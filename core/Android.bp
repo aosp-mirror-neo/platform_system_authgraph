@@ -23,7 +23,23 @@ rust_library {
     host_supported: true,
     vendor_available: true,
     rustlibs: [
+        "libauthgraph_wire",
         "libcoset",
+        "liblog_rust",
         "libzeroize",
     ],
+}
+
+rust_test {
+    name: "libauthgraph_core_unit_test",
+    crate_name: "authgraph_core_unit_test",
+    srcs: ["src/lib.rs"],
+    host_supported: true,
+    rustlibs: [
+        "libauthgraph_wire",
+        "libcoset",
+        "liblog_rust",
+        "libzeroize",
+    ],
+    test_suites: ["general-tests"],
 }
