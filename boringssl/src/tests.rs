@@ -109,3 +109,104 @@ fn test_key_exchange_protocol() {
     ag_test::test_key_exchange_finish(&mut p1_imp, &mut p2_imp);
     ag_test::test_key_exchange_auth_complete(&mut p1_imp, &mut p2_imp);
 }
+
+#[test]
+fn test_ke_with_newer_source() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(2);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(1);
+
+    let mut p1_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(source_device),
+        clock: None,
+    };
+
+    let mut p2_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(sink_device),
+        clock: None,
+    };
+
+    ag_test::test_ke_with_newer_source(&mut p1_imp, &mut p2_imp);
+}
+
+#[test]
+fn test_ke_with_newer_sink() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(1);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(2);
+
+    let mut p1_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(source_device),
+        clock: None,
+    };
+    let mut p2_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(sink_device),
+        clock: None,
+    };
+    ag_test::test_ke_with_newer_sink(&mut p1_imp, &mut p2_imp);
+}
+
+#[test]
+fn test_ke_for_protocol_downgrade() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(2);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(2);
+
+    let mut p1_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(source_device),
+        clock: None,
+    };
+    let mut p2_imp = traits::TraitImpl {
+        aes_gcm: Box::new(crate::BoringAes),
+        ecdh: Box::new(crate::BoringEcDh),
+        ecdsa: Box::new(crate::BoringEcDsa),
+        hmac: Box::new(crate::BoringHmac),
+        hkdf: Box::new(crate::BoringHkdf),
+        sha256: Box::new(crate::BoringSha256),
+        rng: Box::new(crate::BoringRng),
+        device: Box::new(sink_device),
+        clock: None,
+    };
+    ag_test::test_ke_for_version_downgrade(&mut p1_imp, &mut p2_imp);
+}
