@@ -59,13 +59,10 @@ pub mod test_device;
 #[cfg(test)]
 mod tests;
 
-/// Return a populated [`traits::TraitImpl`] structure that uses BoringSSL implementations for
+/// Return a populated [`traits::CryptoTraitImpl`] structure that uses BoringSSL implementations for
 /// cryptographic traits.
-pub fn trait_impls(
-    device: Box<dyn traits::Device>,
-    clock: Option<Box<dyn traits::MonotonicClock>>,
-) -> authgraph_core::traits::TraitImpl {
-    traits::TraitImpl {
+pub fn crypto_trait_impls() -> traits::CryptoTraitImpl {
+    traits::CryptoTraitImpl {
         aes_gcm: Box::new(BoringAes),
         ecdh: Box::new(BoringEcDh),
         ecdsa: Box::new(BoringEcDsa),
@@ -73,7 +70,5 @@ pub fn trait_impls(
         hkdf: Box::new(BoringHkdf),
         sha256: Box::new(BoringSha256),
         rng: Box::new(BoringRng),
-        device,
-        clock,
     }
 }
