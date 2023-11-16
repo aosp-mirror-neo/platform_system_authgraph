@@ -29,6 +29,9 @@ use zeroize::ZeroizeOnDrop;
 
 pub use wire::Key;
 
+/// Length of an AES 256-bits key in bytes
+pub const AES_256_KEY_LEN: usize = 32;
+
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct AesKey(pub [u8; 32]);
@@ -110,7 +113,7 @@ pub enum EcSignKey {
 }
 
 /// Variants of EC public key used to verify signature
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum EcVerifyKey {
     /// On curve Ed25519
     Ed25519(CoseKey),
@@ -148,7 +151,7 @@ pub struct HmacKey(pub [u8; 32]);
 
 /// Identity of an AuthGraph participant. The CDDL is listed in hardware/interfaces/security/
 /// authgraph/aidl/android/hardware/security/Identity.cddl
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Identity {
     /// Version of the cddl
     pub version: i32,
@@ -161,7 +164,7 @@ pub struct Identity {
 /// Certificate chain containing the public signing key. The CDDL is listed in
 /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/
 /// authgraph/ExplicitKeyDiceCertChain.cddl
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CertChain {
     /// Version of the cddl
     pub version: i32,
@@ -174,13 +177,13 @@ pub struct CertChain {
 
 /// An entry in the certificate chain.
 /// TODO: add methods for CBOR encoding/decoding
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DiceChainEntry(pub Vec<u8>);
 
 /// Identity verification policy specifying how to validate the certificate chain. The CDDL is
 /// listed in hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/
 /// DicePolicy.cddl
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Policy(pub Vec<u8>);
 
 /// The output of identity verification.

@@ -31,7 +31,7 @@ use coset::iana::Algorithm;
 pub const AG_KEY_EXCHANGE_PROTOCOL_VERSION_1: i32 = 1;
 
 /// These trait implementations must be provided by an implementation of the Authgraph API.
-pub struct TraitImpl {
+pub struct CryptoTraitImpl {
     /// Implementation of AES-GCM functionality.
     pub aes_gcm: Box<dyn AesGcm>,
     /// Implementation of ECDH functionality
@@ -46,11 +46,6 @@ pub struct TraitImpl {
     pub sha256: Box<dyn Sha256>,
     /// Implementation of secure random number generation
     pub rng: Box<dyn Rng>,
-    /// Implementation of device specific trait methods
-    pub device: Box<dyn Device>,
-    /// Implementation of the trait for the clock to get the time, in order to add timestamp in the
-    /// header of certain arcs created by the sources
-    pub clock: Option<Box<dyn MonotonicClock>>,
 }
 
 /// Trait methods for AES-GCM with 256 bit key (and 16 bytes tag).
@@ -187,18 +182,39 @@ pub trait Device: Send {
         latest_identity: &Identity,
         previous_identity: &Identity,
     ) -> Result<IdentityVerificationDecision, Error>;
-    /// Retrieve the latest supported version of the key exchange protocol by the source (P1).
-    /// Implementers of sinks can mark this as `Unimplemented`.
-    fn get_source_version(&self) -> i32 {
+    /// Retrieve the latest supported version of the key exchange protocol.
+    fn get_version(&self) -> i32 {
         // There is only one version now
         AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
     }
-    /// Given the latest supported version supported by the source, retrieve the version supported
-    /// by the sink. Implementers of the sources can mark this as `Unimplemented`.
-    fn get_sink_version(&self, _peer_version: i32) -> i32 {
+    /// Given the latest supported version supported by the peer, select the matching version. This
+    /// is relevant only when there are multiple versions of the protocol and a given party supports
+    /// multiple versions. This is called on sink, as sink is the one who picks the matching version
+    /// based on source's version.
+    fn get_negotiated_version(&self, _peer_version: i32) -> i32 {
         // There is only one version now
         AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
     }
+    /// An internal entry point that hands over the finalized shared key arcs to the device specific
+    /// implementation so that the application protocol that uses the shared keys for secure
+    /// communication can store them in an appropriate way.
+    fn record_shared_sessions(
+        &mut self,
+        peer_identity: &Identity,
+        session_id: &[u8; 32],
+        shared_keys: &[Vec<u8>; 2],
+        sha256: &dyn Sha256,
+    ) -> Result<(), Error>;
+    /// The counterpart of `record_shared_sessions` above. Given arc(s) containing the shared keys,
+    /// validate them against the records created at the end of each key exchange protocol instance.
+    /// The validation logic depends on the application protocol which uses the shared keys.
+    fn validate_shared_sessions(
+        &self,
+        peer_identity: &Identity,
+        session_id: &[u8; 32],
+        shared_keys: &[Vec<u8>],
+        sha256: &dyn Sha256,
+    ) -> Result<(), Error>;
 }
 
 /// Trait method to get current time  w.r.t a monotonic clock since an epoch that is common between
