@@ -26,6 +26,7 @@ rust_library {
     vendor_available: true,
     rustlibs: [
         "libauthgraph_core",
+        "libauthgraph_wire",
         "libcoset",
         "libhex",
     ],

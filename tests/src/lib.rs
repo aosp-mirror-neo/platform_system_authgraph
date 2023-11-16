@@ -8,6 +8,7 @@ use authgraph_core::keyexchange;
 use authgraph_core::traits::{
     AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256, TraitImpl,
 };
+use authgraph_wire::ErrorCode;
 use coset::{cbor::Value, iana, CoseKeyBuilder};
 
 /// Test basic [`Rng`] functionality.
@@ -578,4 +579,183 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
     assert!(auth_complete_result.is_ok());
     assert_eq!(p1_session_id, p2_session_id)
     // TODO: add more tests on finish_result, and encrypt/decrypt using the agreed keys
+}
+
+/// Verify that the key exchange protocol works when source's version is higher than sink's version
+/// and that the negotiated version is sink's version
+pub fn test_ke_with_newer_source(p1_imp_newer: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+    let source_version = p1_imp_newer.device.get_source_version();
+    let sink_version = p2_imp.device.get_sink_version(source_version);
+    assert!(source_version > sink_version);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = keyexchange::create(p1_imp_newer).unwrap();
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = keyexchange::init(
+        p2_imp,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
+    assert_eq!(p2_version, sink_version);
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = keyexchange::finish(
+        p1_imp_newer,
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    )
+    .unwrap();
+
+    let auth_complete_result =
+        keyexchange::authentication_complete(p2_imp, &p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+}
+
+/// Verify that the key exchange protocol works when sink's version is higher than sources's version
+/// and that the negotiated version is source's version
+pub fn test_ke_with_newer_sink(p1_imp: &mut TraitImpl, p2_imp_newer: &mut TraitImpl) {
+    let source_version = p1_imp.device.get_source_version();
+    let sink_version = p2_imp_newer.device.get_sink_version(source_version);
+    // sink returns the (negotiated) version based on the source's version
+    assert_eq!(source_version, sink_version);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = keyexchange::create(p1_imp).unwrap();
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = keyexchange::init(
+        p2_imp_newer,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        p1_version,
+    )
+    .unwrap();
+    assert_eq!(p2_version, source_version);
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = keyexchange::finish(
+        p1_imp,
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    )
+    .unwrap();
+
+    let auth_complete_result =
+        keyexchange::authentication_complete(p2_imp_newer, &p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+}
+
+/// Verify that the key exchange protocol prevents version downgrade attacks when both source and
+/// sink have versions newer than version 1
+pub fn test_ke_for_version_downgrade(p1_imp_newer: &mut TraitImpl, p2_imp_newer: &mut TraitImpl) {
+    let source_version = p1_imp_newer.device.get_source_version();
+    let sink_version = p2_imp_newer.device.get_sink_version(source_version);
+    assert!(source_version > 1);
+    assert!(sink_version > 1);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: _p1_version,
+    } = keyexchange::create(p1_imp_newer).unwrap();
+
+    let downgraded_version = 1;
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: _p2_shared_keys,
+                session_id: _p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = keyexchange::init(
+        p2_imp_newer,
+        p1_ke_pub_key.as_ref().unwrap(),
+        &p1_identity,
+        &p1_nonce,
+        downgraded_version,
+    )
+    .unwrap();
+    assert_eq!(p2_version, downgraded_version);
+
+    let finish_result = keyexchange::finish(
+        p1_imp_newer,
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    );
+    // `finish` should fail with signature verification error
+    match finish_result {
+        Ok(_) => panic!("protocol downgrade prevention is broken"),
+        Err(e) => match e {
+            Error(ErrorCode::InvalidSignature, _) => {}
+            _ => panic!("wrong error on protocol downgrade"),
+        },
+    }
 }
