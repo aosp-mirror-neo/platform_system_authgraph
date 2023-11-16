@@ -122,16 +122,40 @@ impl traits::Device for AgDevice {
         Err(ag_err!(Unimplemented, ""))
     }
 
-    fn get_source_version(&self) -> i32 {
+    fn get_version(&self) -> i32 {
         *self.version.borrow()
     }
 
-    fn get_sink_version(&self, peer_version: i32) -> i32 {
+    fn get_negotiated_version(&self, peer_version: i32) -> i32 {
         let self_version = *self.version.borrow();
         if peer_version < self_version {
             return peer_version;
         }
         self_version
+    }
+
+    fn record_shared_sessions(
+        &mut self,
+        _peer_identity: &Identity,
+        _session_id: &[u8; 32],
+        _shared_keys: &[Vec<u8>; 2],
+        _sha256: &dyn traits::Sha256,
+    ) -> Result<(), Error> {
+        // The test implementation does not need to store the shared keys because there is no
+        // application protocol to run using the shared keys.
+        Ok(())
+    }
+
+    fn validate_shared_sessions(
+        &self,
+        _peer_identity: &Identity,
+        _session_id: &[u8; 32],
+        _shared_keys: &[Vec<u8>],
+        _sha256: &dyn traits::Sha256,
+    ) -> Result<(), Error> {
+        // The test implementation does not need to validate the shared keys because there is no
+        // application protocol that depends on the shared keys.
+        Ok(())
     }
 }
 
