@@ -40,9 +40,9 @@ use wire::ErrorCode;
 pub use wire::{KeInitResult, SessionInfo, SessionInitiationInfo};
 
 /// Context for deriving the first shared encryption key
-pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_FIRST_ENCRYPTION_KEY";
+pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_ENCRYPTION_KEY_SOURCE_TO_SINK";
 /// Context for deriving the second shared encryption key
-pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_SECOND_ENCRYPTION_KEY";
+pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_ENCRYPTION_KEY_SINK_TO_SOURCE";
 /// Context for deriving the shared HMAC key
 pub const CONTEXT_KE_HMAC_KEY: &[u8] = b"KE_HMAC_KEY";
 
@@ -189,10 +189,10 @@ pub fn finish(
     let own_ke_pub_key = own_ke_key
         .pub_key
         .ok_or(ag_err!(InvalidPubKeyInKey, "own public key is missing for key agreement"))?;
-    let own_ke_pub_key = EcExchangeKeyPub(
-        CoseKey::from_slice(&own_ke_pub_key)
-            .map_err(|e| ag_err!(InvalidKeKey, "invalid own key for key agreement: {:?}", e))?,
-    );
+    let own_ke_pub_key =
+        EcExchangeKeyPub(CoseKey::from_slice(&own_ke_pub_key).map_err(|e| {
+            ag_err!(InvalidPubKeyInKey, "invalid own key for key agreement: {:?}", e)
+        })?);
 
     let salt_input = SaltInput {
         source_version: imp.device.get_source_version(),
@@ -283,10 +283,10 @@ fn decode_peer_info(
     identity: &[u8],
     nonce: &[u8],
 ) -> Result<(EcExchangeKeyPub, Identity, Nonce16), Error> {
-    let pub_key = EcExchangeKeyPub(
-        CoseKey::from_slice(pub_key)
-            .map_err(|e| ag_err!(InvalidKeKey, "invalid peer key for key agreement: {:?}", e))?,
-    );
+    let pub_key =
+        EcExchangeKeyPub(CoseKey::from_slice(pub_key).map_err(|e| {
+            ag_err!(InvalidPeerKeKey, "invalid peer key for key agreement: {:?}", e)
+        })?);
     let identity = Identity::from_slice(identity)
         .map_err(|e| ag_err!(InvalidIdentity, "invalid peer identity: {:?}", e))?;
     let nonce = Nonce16(
@@ -486,7 +486,7 @@ pub fn extract_nonce(protected_headers: &[(Label, Value)]) -> Result<Nonce16, Er
                 }
                 _ => {
                     return Err(ag_err!(
-                        InvalidPubKeyInKey,
+                        InvalidPrivKeyArcInKey,
                         "invalid encoding of own nonce for key agreement"
                     ))
                 }
