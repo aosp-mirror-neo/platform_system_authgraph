@@ -30,10 +30,21 @@ use core::cell::RefCell;
 use coset::iana;
 
 /// The struct implementing the Authgraph `Device` trait.
-#[derive(Default)]
 pub struct AgDevice {
     per_boot_key: RefCell<Option<AesKey>>,
     identity: RefCell<Option<(EcSignKey, Identity)>>,
+    // Make the (source/sink) version configurable for testing purposes
+    version: RefCell<i32>,
+}
+
+impl Default for AgDevice {
+    fn default() -> Self {
+        AgDevice {
+            per_boot_key: RefCell::new(None),
+            identity: RefCell::new(None),
+            version: RefCell::new(1),
+        }
+    }
 }
 
 impl traits::Device for AgDevice {
@@ -109,5 +120,48 @@ impl traits::Device for AgDevice {
         // TODO (b/304623554): this trait method is not used in the key exchange protocol. This will
         // be implemented in the next phase of AuthGraph
         Err(ag_err!(Unimplemented, ""))
+    }
+
+    fn get_version(&self) -> i32 {
+        *self.version.borrow()
+    }
+
+    fn get_negotiated_version(&self, peer_version: i32) -> i32 {
+        let self_version = *self.version.borrow();
+        if peer_version < self_version {
+            return peer_version;
+        }
+        self_version
+    }
+
+    fn record_shared_sessions(
+        &mut self,
+        _peer_identity: &Identity,
+        _session_id: &[u8; 32],
+        _shared_keys: &[Vec<u8>; 2],
+        _sha256: &dyn traits::Sha256,
+    ) -> Result<(), Error> {
+        // The test implementation does not need to store the shared keys because there is no
+        // application protocol to run using the shared keys.
+        Ok(())
+    }
+
+    fn validate_shared_sessions(
+        &self,
+        _peer_identity: &Identity,
+        _session_id: &[u8; 32],
+        _shared_keys: &[Vec<u8>],
+        _sha256: &dyn traits::Sha256,
+    ) -> Result<(), Error> {
+        // The test implementation does not need to validate the shared keys because there is no
+        // application protocol that depends on the shared keys.
+        Ok(())
+    }
+}
+
+impl AgDevice {
+    /// Make the version configurable for testing purposes
+    pub fn set_version(&self, version: i32) {
+        *self.version.borrow_mut() = version
     }
 }
