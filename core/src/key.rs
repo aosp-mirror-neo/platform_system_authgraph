@@ -16,14 +16,21 @@
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
 use crate::ag_verr;
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
 use crate::traits::Rng;
 use crate::FallibleAllocExt;
 use alloc::vec::Vec;
+use authgraph_wire as wire;
 use coset::{
     cbor, cbor::value::Value, iana, AsCborValue, CborSerializable, CoseError, CoseKey, Label,
 };
+use wire::ErrorCode;
 use zeroize::ZeroizeOnDrop;
+
+pub use wire::Key;
+
+/// Length of an AES 256-bits key in bytes
+pub const AES_256_KEY_LEN: usize = 32;
 
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
@@ -106,7 +113,7 @@ pub enum EcSignKey {
 }
 
 /// Variants of EC public key used to verify signature
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum EcVerifyKey {
     /// On curve Ed25519
     Ed25519(CoseKey),
@@ -144,7 +151,7 @@ pub struct HmacKey(pub [u8; 32]);
 
 /// Identity of an AuthGraph participant. The CDDL is listed in hardware/interfaces/security/
 /// authgraph/aidl/android/hardware/security/Identity.cddl
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Identity {
     /// Version of the cddl
     pub version: i32,
@@ -157,7 +164,7 @@ pub struct Identity {
 /// Certificate chain containing the public signing key. The CDDL is listed in
 /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/
 /// authgraph/ExplicitKeyDiceCertChain.cddl
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CertChain {
     /// Version of the cddl
     pub version: i32,
@@ -170,13 +177,13 @@ pub struct CertChain {
 
 /// An entry in the certificate chain.
 /// TODO: add methods for CBOR encoding/decoding
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DiceChainEntry(pub Vec<u8>);
 
 /// Identity verification policy specifying how to validate the certificate chain. The CDDL is
 /// listed in hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/
 /// DicePolicy.cddl
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Policy(pub Vec<u8>);
 
 /// The output of identity verification.
@@ -189,17 +196,6 @@ pub enum IdentityVerificationDecision {
     /// The latest certificate chain is allowed by the identity verification policy and the identity
     /// owner is updated
     Updated,
-}
-
-/// General representation of a key. If the key is a symmetric key, it is encrypted in an arc where
-/// the encryption key is the per-boot key. If it is an asymmetric key, public key is included along
-/// with the private key encrypted an arc from the per-boot-key.
-pub struct Key {
-    /// Public key, as a CBOR encoded COSE key [RFC9052 s7]
-    pub pub_key: Option<Vec<u8>>,
-    /// Secret key encrypted in an arc from the per-boot key. The CDDL of an arc is listed in
-    /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/Arc.cddl
-    pub arc_from_pbk: Option<Vec<u8>>,
 }
 
 /// The structure containing the inputs for the `salt` used in extracting a pseudo random key

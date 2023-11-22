@@ -18,65 +18,45 @@
 //! (source) and P2 (sink).
 use crate::{
     ag_err, arc,
-    arc::ArcPayload,
-    error::{Error, ErrorCode},
+    error::Error,
     key::{
         check_cose_key_params, AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub,
         EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey,
-        SaltInput, SessionIdInput,
+        SaltInput, SessionIdInput, AES_256_KEY_LEN,
     },
-    traits::{EcDh, EcDsa, Hkdf, Sha256, TraitImpl},
+    traits::{CryptoTraitImpl, Device, EcDh, Hkdf, Sha256},
     try_to_vec, FallibleAllocExt,
 };
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use authgraph_wire as wire;
 use core::mem::take;
 use coset::{
     cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
 };
+use log::info;
+use wire::ErrorCode;
+
+pub use wire::{KeInitResult, SessionInfo, SessionInitiationInfo};
 
 /// Context for deriving the first shared encryption key
-pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_FIRST_ENCRYPTION_KEY";
+pub const CONTEXT_KE_ENCRYPTION_KEY_1: &[u8] = b"KE_ENCRYPTION_KEY_SOURCE_TO_SINK";
 /// Context for deriving the second shared encryption key
-pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_SECOND_ENCRYPTION_KEY";
+pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_ENCRYPTION_KEY_SINK_TO_SOURCE";
 /// Context for deriving the shared HMAC key
 pub const CONTEXT_KE_HMAC_KEY: &[u8] = b"KE_HMAC_KEY";
+/// Default limit for opened sessions for either source or sink operationss
+pub const MAX_OPENED_SESSIONS: usize = 16;
 
-/// Return type of the `create` method.
-pub struct SessionInitiationInfo {
-    /// An EC key created for ECDH
-    pub ke_key: Key,
-    /// CBOR encoded `Identity` of the party who creates the `ke_key`
-    pub identity: Vec<u8>,
-    /// The nonce created by the party who creates the `ke_key`
-    pub nonce: Vec<u8>,
-    /// The protocol version - to prevent protocol downgrade attacks.
-    pub version: i32,
-}
-
-/// Session information returned as part of the authenticated key exchange.
-/// Return type of the `finish` method.
-pub struct SessionInfo {
-    /// Two arcs created by encrypting the two shared encryption keys:
-    /// i) encryption key for the incoming messages
-    /// ii) encryption key for the outgoing messages
-    pub shared_keys: [Vec<u8>; 2],
-    /// Session id computed by concatenating the nonces and computing HMAC over it using the shared
-    /// HMAC key
-    pub session_id: Vec<u8>,
-    /// The signature over the session id in `CoseSign1` format.
-    pub session_id_signature: Vec<u8>,
-}
-
-/// Return type of the `init` method.
-pub struct KEInitResult {
-    /// Session initiation info
-    pub session_init_info: SessionInitiationInfo,
-    /// Session info
-    pub session_info: SessionInfo,
-}
+/// Length of a session identifier in bytes
+pub const SESSION_ID_LEN: usize = 32;
+/// Length of a SHA 256 digest in bytes
+pub const SHA_256_LEN: usize = 32;
 
 /// Enum defining the roles played by the two AuthGraph participants
+#[derive(Clone, Copy)]
 pub enum Role {
     /// AuthGraph source
     Source = 1,
@@ -84,223 +64,695 @@ pub enum Role {
     Sink = 2,
 }
 
-/// This method is invoked on P1 (source).
-/// Creates an ephemeral EC key pair for ECDH and a nonce (16 bytes).
-pub fn create(imp: &mut TraitImpl) -> Result<SessionInitiationInfo, Error> {
-    // Create an EC key for ECDH
-    let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: mut priv_key_for_ecdh } =
-        imp.ecdh.generate_key()?;
-    // Create a nonce for key agreement
-    let nonce_for_ke = Nonce16::new(&mut *imp.rng);
+/// Encapsulation of an AuthGraph Source
+pub struct AuthGraphParticipant {
+    crypto: CryptoTraitImpl,
+    device: Box<dyn Device>,
+    opened_ke_sessions: OpenedSessions,
+    opened_shared_sessions: OpenedSessions,
+}
 
-    let pbk = imp.device.get_or_create_per_boot_key(&*imp.aes_gcm, &mut *imp.rng)?;
-    let mut protected_headers = Vec::<(Label, Value)>::new();
-    protected_headers.try_push((arc::KE_NONCE, Value::Bytes(nonce_for_ke.0.clone().to_vec())))?;
-    let priv_key_arc = arc::create_arc(
-        &pbk,
-        arc::ArcContent {
-            payload: ArcPayload(take(&mut priv_key_for_ecdh.0)),
-            protected_headers,
+// Session identifier is the computation of HMAC over the concatenation of the nonces of source
+// and sink with the HMAC key derived from the shared secret computed via the key exchange protocol.
+type SessionIdentifier = [u8; SESSION_ID_LEN];
+
+// Session digest is computed as the SHA-256 digest of the concatenation of the peer identity and
+// the session identifier
+type SessionDigest = [u8; SHA_256_LEN];
+
+/// Data structure to hold the information about opened sessions during key exchange
+struct OpenedSessions {
+    capacity: usize,
+    sessions: VecDeque<SessionDigest>,
+}
+
+impl OpenedSessions {
+    fn new(max_num_sessions: usize) -> Result<Self, Error> {
+        let mut sessions = VecDeque::new();
+        sessions.try_reserve(max_num_sessions)?;
+        Ok(OpenedSessions { capacity: max_num_sessions, sessions })
+    }
+
+    fn add(&mut self, opened_session: SessionDigest) {
+        if self.sessions.len() == self.capacity {
+            info!("Max number of opened sessions reached. Removing the oldest session.");
+            self.sessions.pop_front();
+        }
+        self.sessions.push_back(opened_session);
+    }
+
+    // Remove a tracked session; return `InternalError`` if the provided session is not tracked.
+    fn remove(&mut self, opened_session: SessionDigest) -> Result<(), Error> {
+        if self.sessions.contains(&opened_session) {
+            self.sessions.retain(|&session| session != opened_session);
+            Ok(())
+        } else {
+            Err(ag_err!(InternalError, "session not found"))
+        }
+    }
+}
+
+impl AuthGraphParticipant {
+    /// Creates an instance of AuthGraphParticipant
+    pub fn new(
+        crypto: CryptoTraitImpl,
+        device: Box<dyn Device>,
+        max_num_sessions: usize,
+    ) -> Result<Self, Error> {
+        Ok(AuthGraphParticipant {
+            crypto,
+            device,
+            opened_ke_sessions: OpenedSessions::new(max_num_sessions)?,
+            opened_shared_sessions: OpenedSessions::new(max_num_sessions)?,
+        })
+    }
+
+    /// First step in the key exchange protocol.
+    pub fn create(&mut self) -> Result<SessionInitiationInfo, Error> {
+        // Create an EC key for ECDH
+        let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: mut priv_key_for_ecdh } =
+            self.crypto.ecdh.generate_key()?;
+        // Create a nonce for key agreement
+        let nonce_for_ke = Nonce16::new(&mut *self.crypto.rng);
+
+        let pbk =
+            self.device.get_or_create_per_boot_key(&*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
+        let mut protected_headers = Vec::<(Label, Value)>::new();
+        protected_headers
+            .try_push((arc::KE_NONCE, Value::Bytes(nonce_for_ke.0.clone().to_vec())))?;
+        let priv_key_arc = arc::create_arc(
+            &pbk,
+            arc::ArcContent {
+                payload: arc::ArcPayload(take(&mut priv_key_for_ecdh.0)),
+                protected_headers,
+                ..Default::default()
+            },
+            &*self.crypto.aes_gcm,
+            &mut *self.crypto.rng,
+        )?;
+        let (_sign_key, identity) = self.device.get_identity()?;
+        let ke_key =
+            Key { pub_key: Some(pub_key_for_ecdh.0.to_vec()?), arc_from_pbk: Some(priv_key_arc) };
+        let ke_digest = compute_ke_key_digest(&ke_key, &*self.crypto.sha256)?;
+        self.opened_ke_sessions.add(ke_digest);
+        Ok(SessionInitiationInfo {
+            ke_key,
+            identity: identity.to_vec()?,
+            nonce: nonce_for_ke.0.to_vec(),
+            version: self.device.get_version(),
+        })
+    }
+
+    /// Second step in the key exchange protocol.
+    pub fn init(
+        &mut self,
+        peer_key: &[u8],
+        peer_id: &[u8],
+        peer_nonce: &[u8],
+        peer_version: i32,
+    ) -> Result<KeInitResult, Error> {
+        if self.device.get_negotiated_version(peer_version) > peer_version {
+            return Err(ag_err!(InternalError, "protocol version is greater than peer's version"));
+        }
+        let key_for_ecdh = self.crypto.ecdh.generate_key()?;
+        let own_nonce = Nonce16::new(&mut *self.crypto.rng);
+
+        let (peer_pub_key, peer_identity, peer_nonce) =
+            decode_peer_info(peer_key, peer_id, peer_nonce)?;
+
+        let ecdh_secret =
+            compute_shared_secret(&*self.crypto.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
+        let (sign_key, own_identity) = self.device.get_identity()?;
+
+        let salt_input = SaltInput {
+            source_version: peer_version,
+            sink_ke_pub_key: key_for_ecdh.pub_key.clone(),
+            source_ke_pub_key: peer_pub_key,
+            sink_ke_nonce: own_nonce.clone(),
+            source_ke_nonce: peer_nonce.clone(),
+            sink_cert_chain: own_identity.cert_chain.clone(),
+            source_cert_chain: peer_identity.cert_chain.clone(),
+        };
+
+        let salt = compute_salt(salt_input, &*self.crypto.sha256)?;
+        let (in_encrypt_key, out_encrypt_key, hmac_key) =
+            derive_shared_keys(&ecdh_secret, &salt, Role::Sink, &*self.crypto.hkdf)?;
+
+        let (session_id, signature) = self.compute_sign_session_id(
+            SessionIdInput { sink_ke_nonce: own_nonce.clone(), source_ke_nonce: peer_nonce },
+            HmacKey(hmac_key.0),
+            sign_key,
+        )?;
+
+        // create two arcs encrypting the two shared encrypting keys with the per-boot-key
+        let shared_keys = self.create_shared_key_arcs(
+            own_identity.clone(),
+            peer_identity.clone(),
+            AesKey(in_encrypt_key.0),
+            AesKey(out_encrypt_key.0),
+            &session_id,
+            arc::AuthenticationCompleted(false),
+        )?;
+        let session_digest =
+            compute_session_digest(&peer_identity, &session_id, &*self.crypto.sha256)?;
+        self.opened_shared_sessions.add(session_digest);
+        Ok(KeInitResult {
+            session_init_info: SessionInitiationInfo {
+                ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
+                identity: own_identity.to_vec()?,
+                nonce: own_nonce.0.to_vec(),
+                version: self.device.get_negotiated_version(peer_version),
+            },
+            session_info: SessionInfo {
+                shared_keys,
+                session_id: session_id.to_vec(),
+                session_id_signature: signature,
+            },
+        })
+    }
+
+    /// Third step in the key exchange protocol.
+    pub fn finish(
+        &mut self,
+        peer_key: &[u8],
+        peer_id: &[u8],
+        peer_sig: &[u8],
+        peer_nonce: &[u8],
+        peer_version: i32,
+        own_ke_key: Key,
+    ) -> Result<SessionInfo, Error> {
+        let ke_digest = compute_ke_key_digest(&own_ke_key, &*self.crypto.sha256)?;
+        self.opened_ke_sessions
+            .remove(ke_digest)
+            .map_err(|_| ag_err!(InvalidKeKey, "finish is called on invalid session"))?;
+        if self.device.get_version() < peer_version {
+            return Err(ag_err!(
+                IncompatibleProtocolVersion,
+                "peer's protocol version is incompatible"
+            ));
+        }
+        let pbk = self.device.get_per_boot_key()?;
+        let mut own_ke_key_arc_content = arc::decipher_arc(
+            &pbk,
+            &own_ke_key
+                .arc_from_pbk
+                .ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
+            &*self.crypto.aes_gcm,
+        )
+        .map_err(|e| ag_err!(InvalidPrivKeyArcInKey, "failed to decrypt arc: {e:?}"))?;
+
+        let own_ke_nonce = extract_nonce(&own_ke_key_arc_content.protected_headers)?;
+
+        let (peer_pub_key, peer_identity, peer_nonce) =
+            decode_peer_info(peer_key, peer_id, peer_nonce)?;
+
+        let ecdh_secret = compute_shared_secret(
+            &*self.crypto.ecdh,
+            &EcExchangeKeyPriv(take(&mut own_ke_key_arc_content.payload.0)),
+            &peer_pub_key,
+        )?;
+
+        let (sign_key, own_identity) = self.device.get_identity()?;
+        let own_ke_pub_key = own_ke_key
+            .pub_key
+            .ok_or(ag_err!(InvalidPubKeyInKey, "own public key is missing for key agreement"))?;
+        let own_ke_pub_key =
+            EcExchangeKeyPub(CoseKey::from_slice(&own_ke_pub_key).map_err(|e| {
+                ag_err!(InvalidPubKeyInKey, "invalid own key for key agreement: {:?}", e)
+            })?);
+
+        let salt_input = SaltInput {
+            source_version: self.device.get_version(),
+            sink_ke_pub_key: peer_pub_key,
+            source_ke_pub_key: own_ke_pub_key,
+            sink_ke_nonce: peer_nonce.clone(),
+            source_ke_nonce: own_ke_nonce.clone(),
+            sink_cert_chain: peer_identity.cert_chain.clone(),
+            source_cert_chain: own_identity.cert_chain.clone(),
+        };
+
+        let salt = compute_salt(salt_input, &*self.crypto.sha256)?;
+
+        let (in_encrypt_key, out_encrypt_key, hmac_key) =
+            derive_shared_keys(&ecdh_secret, &salt, Role::Source, &*self.crypto.hkdf)?;
+
+        let (session_id, signature) = self.compute_sign_session_id(
+            SessionIdInput { sink_ke_nonce: peer_nonce, source_ke_nonce: own_ke_nonce },
+            HmacKey(hmac_key.0),
+            sign_key,
+        )?;
+
+        // Process/verify peer's cert chain and the peer's signature on the session id and retrieve
+        // the peer's public signing key
+        let verify_key =
+            self.device.process_peer_cert_chain(&peer_identity.cert_chain, &*self.crypto.ecdsa)?;
+        self.verify_signature_on_session_id(&verify_key, &session_id, peer_sig)?;
+
+        // create two arcs encrypting the two shared encrypting keys with the per-boot-key
+        let shared_keys = self.create_shared_key_arcs(
+            peer_identity.clone(),
+            own_identity,
+            AesKey(in_encrypt_key.0),
+            AesKey(out_encrypt_key.0),
+            &session_id,
+            arc::AuthenticationCompleted(true),
+        )?;
+
+        self.device.record_shared_sessions(
+            &peer_identity,
+            &session_id,
+            &shared_keys,
+            &*self.crypto.sha256,
+        )?;
+        Ok(SessionInfo {
+            shared_keys,
+            session_id: session_id.to_vec(),
+            session_id_signature: signature,
+        })
+    }
+
+    /// Fourth step in the key exchange protocol.
+    pub fn authentication_complete(
+        &mut self,
+        peer_sig: &[u8],
+        shared_keys: [Vec<u8>; 2],
+    ) -> Result<[Vec<u8>; 2], Error> {
+        let in_key_arc = &shared_keys[0];
+        let out_key_arc = &shared_keys[1];
+
+        let pbk = self.device.get_per_boot_key()?;
+
+        let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*self.crypto.aes_gcm)
+            .map_err(|e| {
+                ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+            })?;
+        let (in_session_id, in_source_identity, _) = process_shared_key_arc_headers(
+            &in_key_arc_content.protected_headers,
+            &arc::AuthenticationCompleted(false),
+        )?;
+
+        let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*self.crypto.aes_gcm)
+            .map_err(|e| {
+                ag_err!(InvalidSharedKeyArcs, "failed to decrypt inbound shared key: {e:?}")
+            })?;
+        let (out_session_id, out_source_identity, _) = process_shared_key_arc_headers(
+            &out_key_arc_content.protected_headers,
+            &arc::AuthenticationCompleted(false),
+        )?;
+
+        if in_session_id != out_session_id {
+            return Err(ag_err!(InvalidSharedKeyArcs, "session id mismatch"));
+        }
+
+        if in_source_identity != out_source_identity {
+            return Err(ag_err!(InvalidSharedKeyArcs, "peer identity mismatch"));
+        }
+        // Remove the corresponding entry from opened shared sessions which was inserted in `init`
+        let session_digest =
+            compute_session_digest(&in_source_identity, &in_session_id, &*self.crypto.sha256)?;
+        self.opened_shared_sessions.remove(session_digest).map_err(|_| {
+            ag_err!(InvalidSharedKeyArcs, "authentication_complete is called on invalid session")
+        })?;
+
+        // Verify peer's cert chain and the peer's signature on the session id
+        let verification_key = self
+            .device
+            .process_peer_cert_chain(&in_source_identity.cert_chain, &*self.crypto.ecdsa)?;
+        self.verify_signature_on_session_id(&verification_key, &in_session_id, peer_sig)?;
+
+        let updated_shared_key_arcs =
+            self.auth_complete_shared_key_arcs(in_key_arc_content, out_key_arc_content)?;
+
+        self.device.record_shared_sessions(
+            &in_source_identity,
+            &in_session_id,
+            &updated_shared_key_arcs,
+            &*self.crypto.sha256,
+        )?;
+        Ok(updated_shared_key_arcs)
+    }
+
+    fn create_shared_key_arcs(
+        &mut self,
+        sink_id: Identity,
+        source_id: Identity,
+        in_encrypt_key: AesKey,
+        out_encrypt_key: AesKey,
+        session_id: &[u8],
+        auth_complete: arc::AuthenticationCompleted,
+    ) -> Result<[Vec<u8>; 2], Error> {
+        let pbk = match auth_complete.0 {
+            false => self
+                .device
+                .get_or_create_per_boot_key(&*self.crypto.aes_gcm, &mut *self.crypto.rng)?,
+            true => self.device.get_per_boot_key()?,
+        };
+
+        // auth complete protected header
+        let auth_complete_hdr = (arc::AUTHENTICATION_COMPLETE, Value::Bool(auth_complete.0));
+        // session id protected header
+        let session_id_hdr = (arc::SESSION_ID, Value::Bytes(try_to_vec(session_id)?));
+        // direction of encryption
+        let in_direction_hdr =
+            (arc::DIRECTION, Value::Integer((arc::DirectionOfEncryption::In as i32).into()));
+        // permissions header
+        let permissions_encoded = arc::Permissions {
+            source_id: Some(source_id),
+            sink_id: Some(sink_id),
             ..Default::default()
-        },
-        &*imp.aes_gcm,
-        &mut *imp.rng,
-    )?;
-    let (_sign_key, identity) = imp.device.get_identity()?;
-    Ok(SessionInitiationInfo {
-        ke_key: Key {
-            pub_key: Some(pub_key_for_ecdh.0.to_vec()?),
-            arc_from_pbk: Some(priv_key_arc),
-        },
-        identity: identity.to_vec()?,
-        nonce: nonce_for_ke.0.to_vec(),
-        version: imp.device.get_source_version(),
-    })
+        }
+        .to_cbor_value()?;
+        let permission_hdr = (arc::PERMISSIONS, permissions_encoded);
+
+        let mut in_protected_headers = Vec::<(Label, Value)>::new();
+        in_protected_headers.try_reserve(4)?;
+        in_protected_headers.push(auth_complete_hdr.clone());
+        in_protected_headers.push(session_id_hdr.clone());
+        in_protected_headers.push(permission_hdr.clone());
+        in_protected_headers.push(in_direction_hdr);
+
+        let in_encrypt_key_arc = arc::create_arc(
+            &pbk,
+            arc::ArcContent {
+                payload: arc::ArcPayload(in_encrypt_key.0.to_vec()),
+                protected_headers: in_protected_headers,
+                ..Default::default()
+            },
+            &*self.crypto.aes_gcm,
+            &mut *self.crypto.rng,
+        )?;
+
+        // direction of encryption
+        let out_direction_hdr =
+            (arc::DIRECTION, Value::Integer((arc::DirectionOfEncryption::Out as i32).into()));
+        let mut out_protected_headers = Vec::<(Label, Value)>::new();
+        out_protected_headers.try_reserve(4)?;
+        out_protected_headers.push(auth_complete_hdr);
+        out_protected_headers.push(session_id_hdr);
+        out_protected_headers.push(permission_hdr);
+        out_protected_headers.push(out_direction_hdr);
+
+        let out_encrypt_key_arc = arc::create_arc(
+            &pbk,
+            arc::ArcContent {
+                payload: arc::ArcPayload(out_encrypt_key.0.to_vec()),
+                protected_headers: out_protected_headers,
+                ..Default::default()
+            },
+            &*self.crypto.aes_gcm,
+            &mut *self.crypto.rng,
+        )?;
+        Ok([in_encrypt_key_arc, out_encrypt_key_arc])
+    }
+
+    /// Update the `authentication_complete` protected header in both arcs to be true
+    pub fn auth_complete_shared_key_arcs(
+        &mut self,
+        mut in_arc_content: arc::ArcContent,
+        mut out_arc_content: arc::ArcContent,
+    ) -> Result<[Vec<u8>; 2], Error> {
+        in_arc_content.protected_headers.retain(|v| v.0 != arc::AUTHENTICATION_COMPLETE);
+        out_arc_content.protected_headers.retain(|v| v.0 != arc::AUTHENTICATION_COMPLETE);
+
+        let auth_complete_hdr = (arc::AUTHENTICATION_COMPLETE, Value::Bool(true));
+        in_arc_content.protected_headers.try_push(auth_complete_hdr.clone())?;
+        out_arc_content.protected_headers.try_push(auth_complete_hdr)?;
+
+        let pbk = self.device.get_per_boot_key()?;
+        let in_encrypt_key_arc =
+            arc::create_arc(&pbk, in_arc_content, &*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
+        let out_encrypt_key_arc =
+            arc::create_arc(&pbk, out_arc_content, &*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
+        Ok([in_encrypt_key_arc, out_encrypt_key_arc])
+    }
+
+    fn compute_sign_session_id(
+        &self,
+        session_id_input: SessionIdInput,
+        hmac_key: HmacKey,
+        sign_key: Option<EcSignKey>,
+    ) -> Result<(SessionIdentifier, Vec<u8>), Error> {
+        let session_id = self.crypto.hmac.compute_hmac(&hmac_key, &session_id_input.to_vec()?)?;
+
+        // Construct `CoseSign1`
+        let protected =
+            HeaderBuilder::new().algorithm(self.device.get_cose_sign_algorithm()).build();
+        let cose_sign1 = CoseSign1Builder::new()
+            .protected(protected)
+            .try_create_detached_signature(&session_id, &[], |input| match sign_key {
+                Some(key) => self.crypto.ecdsa.sign(&key, input),
+                None => self.device.sign_data(&*self.crypto.ecdsa, input),
+            })?
+            .build();
+
+        Ok((
+            session_id
+                .as_slice()
+                .try_into()
+                .map_err(|e| ag_err!(InternalError, "invalid session id: {:?}", e))?,
+            cose_sign1.to_vec()?,
+        ))
+    }
+
+    /// Returns the latest supported version
+    pub fn get_version(&self) -> i32 {
+        self.device.get_version()
+    }
+
+    /// Process and extract signature verification key from the peer identity
+    pub fn peer_verification_key_from_identity(
+        &self,
+        identity: &[u8],
+    ) -> Result<EcVerifyKey, Error> {
+        let identity = Identity::from_slice(identity)?;
+        self.device.process_peer_cert_chain(&identity.cert_chain, &*self.crypto.ecdsa)
+    }
+
+    /// Verify the signature in a CBOR-encoded `COSE_Sign1` with detached payload `session_id`.
+    pub fn verify_signature_on_session_id(
+        &self,
+        verify_key: &EcVerifyKey,
+        session_id: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        let cose_sign1 = CoseSign1::from_slice(signature)?;
+        match verify_key {
+            EcVerifyKey::Ed25519(cose_key) => {
+                check_cose_key_params(
+                    cose_key,
+                    iana::KeyType::OKP,
+                    iana::Algorithm::EdDSA,
+                    iana::EllipticCurve::Ed25519,
+                    ErrorCode::InvalidCertChain,
+                )?;
+            }
+            EcVerifyKey::P256(cose_key) => {
+                check_cose_key_params(
+                    cose_key,
+                    iana::KeyType::EC2,
+                    iana::Algorithm::ES256, // ECDSA
+                    iana::EllipticCurve::P_256,
+                    ErrorCode::InvalidCertChain,
+                )?;
+            }
+            EcVerifyKey::P384(cose_key) => {
+                check_cose_key_params(
+                    cose_key,
+                    iana::KeyType::EC2,
+                    iana::Algorithm::ES384,
+                    iana::EllipticCurve::P_384,
+                    ErrorCode::InvalidCertChain,
+                )?;
+            }
+        }
+        cose_sign1.verify_detached_signature(session_id, &[], |signature, data| {
+            self.crypto.ecdsa.verify_signature(verify_key, data, signature)
+        })
+    }
+
+    /// An external entry point for retrieving the decrypted shared keys, given the arcs containing
+    /// the shared keys. The given arcs are validated against the records created at the end of each
+    /// key exchange. The number of arcs can be either one or two, depending on whether a particular
+    /// application protocol involves one-way (i.e. either outgoing or incoming messages) or
+    /// two-way communication (i.e. both outgoing and incoming messages).
+    pub fn decipher_shared_keys_from_arcs(&self, arcs: &[Vec<u8>]) -> Result<Vec<AesKey>, Error> {
+        if arcs.len() > 2 || arcs.is_empty() {
+            return Err(ag_err!(
+                InvalidSharedKeyArcs,
+                "expected one or two arcs, provided {} arcs",
+                arcs.len()
+            ));
+        }
+        let arc_contents = self.decrypt_and_validate_shared_key_arcs(arcs)?;
+        let mut shared_keys = Vec::<AesKey>::new();
+        for arc_content in arc_contents {
+            if arc_content.payload.0.len() != AES_256_KEY_LEN {
+                return Err(ag_err!(
+                    InvalidSharedKeyArcs,
+                    "payload key has invalid length: {}",
+                    arc_content.payload.0.len()
+                ));
+            }
+            let mut key = AesKey([0; AES_256_KEY_LEN]);
+            key.0.copy_from_slice(&arc_content.payload.0);
+            if key.0 == [0; AES_256_KEY_LEN] {
+                return Err(ag_err!(InvalidSharedKeyArcs, "payload key is all zero",));
+            }
+            shared_keys.try_push(key)?;
+        }
+        Ok(shared_keys)
+    }
+    /// Decrypt the provided arcs, validate and return the arc contents.
+    fn decrypt_and_validate_shared_key_arcs(
+        &self,
+        arcs: &[Vec<u8>],
+    ) -> Result<Vec<arc::ArcContent>, Error> {
+        if arcs.is_empty() {
+            return Err(ag_err!(InvalidSharedKeyArcs, "array of arcs is empty"));
+        }
+        let mut session_identifier: Option<[u8; SESSION_ID_LEN]> = None;
+        let mut source_identity: Option<Identity> = None;
+        let mut sink_identity: Option<Identity> = None;
+        let mut arc_contents = Vec::<arc::ArcContent>::new();
+        for arc in arcs {
+            let pbk = self.device.get_per_boot_key()?;
+            let arc_content = arc::decipher_arc(&pbk, arc, &*self.crypto.aes_gcm).map_err(|e| {
+                ag_err!(InvalidSharedKeyArcs, "failed to decrypt shared key: {e:?}")
+            })?;
+            let (session_id, source_id, sink_id) = process_shared_key_arc_headers(
+                &arc_content.protected_headers,
+                &arc::AuthenticationCompleted(true),
+            )?;
+            arc_contents.try_push(arc_content)?;
+            match &session_identifier {
+                Some(id) if *id == session_id => {}
+                Some(_) => {
+                    return Err(ag_err!(InvalidSharedKeyArcs, "session id mismatch"));
+                }
+                None => {
+                    session_identifier = Some(session_id);
+                }
+            }
+            match &source_identity {
+                Some(identity) if *identity == source_id => {}
+                Some(_) => {
+                    return Err(ag_err!(InvalidSharedKeyArcs, "source identity mismatch"));
+                }
+                None => {
+                    source_identity = Some(source_id);
+                }
+            }
+            match &sink_identity {
+                Some(identity) if *identity == sink_id => {}
+                Some(_) => {
+                    return Err(ag_err!(InvalidSharedKeyArcs, "sink identity mismatch"));
+                }
+                None => {
+                    sink_identity = Some(sink_id);
+                }
+            }
+        }
+        // It is safe to unwrap because we ensure that there is at least one arc provided in the
+        // method call
+        let session_identifier = session_identifier.unwrap();
+        let source_identity = source_identity.unwrap();
+        let sink_identity = sink_identity.unwrap();
+        let (_, self_identity) = self.device.get_identity()?;
+        if self_identity == source_identity {
+            self.device.validate_shared_sessions(
+                &sink_identity,
+                &session_identifier,
+                arcs,
+                &*self.crypto.sha256,
+            )?;
+        } else if self_identity == sink_identity {
+            self.device.validate_shared_sessions(
+                &source_identity,
+                &session_identifier,
+                arcs,
+                &*self.crypto.sha256,
+            )?;
+        } else {
+            // Note: it is not possible to reach this branch because if the arc is decrypted by the
+            // per-boot key, the correct self identity should have been included in the arc.
+            return Err(ag_err!(InvalidSharedKeyArcs, "self identity is not included in the arc."));
+        }
+        Ok(arc_contents)
+    }
 }
 
-/// This method is invoked on P2 (sink).
-/// This is the second step in the key exchange protocol.
-pub fn init(
-    imp: &mut TraitImpl,
-    peer_key: &[u8],
-    peer_id: &[u8],
-    peer_nonce: &[u8],
-    peer_version: i32,
-) -> Result<KEInitResult, Error> {
-    if imp.device.get_sink_version(peer_version) > peer_version {
-        ag_err!(InternalError, "protocol version is greater than peer's version");
-    }
-    let key_for_ecdh = imp.ecdh.generate_key()?;
-    let own_nonce = Nonce16::new(&mut *imp.rng);
+fn compute_ke_key_digest(ke_key: &Key, sha256: &dyn Sha256) -> Result<[u8; SHA_256_LEN], Error> {
+    let mut key_input = Vec::new();
+    key_input.try_extend_from_slice(
+        ke_key.pub_key.as_ref().ok_or_else(|| ag_err!(InvalidPubKeyInKey, "missing public key"))?,
+    )?;
+    key_input.try_extend_from_slice(
+        ke_key
+            .arc_from_pbk
+            .as_ref()
+            .ok_or_else(|| ag_err!(InvalidPrivKeyArcInKey, "missing private key arc"))?,
+    )?;
+    sha256.compute_sha256(&key_input)
+}
 
-    let (peer_pub_key, peer_identity, peer_nonce) =
-        decode_peer_info(peer_key, peer_id, peer_nonce)?;
+fn compute_session_digest(
+    peer_identity: &Identity,
+    session_id: &[u8; SESSION_ID_LEN],
+    sha256: &dyn Sha256,
+) -> Result<SessionDigest, Error> {
+    let mut session_info = Vec::new();
+    session_info.try_extend_from_slice(&peer_identity.clone().to_vec()?)?;
+    session_info.try_extend_from_slice(session_id)?;
+    sha256.compute_sha256(&session_info)
+}
 
-    let ecdh_secret = compute_shared_secret(&*imp.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
-    let (sign_key, own_identity) = imp.device.get_identity()?;
-
-    let salt_input = SaltInput {
-        source_version: peer_version,
-        sink_ke_pub_key: key_for_ecdh.pub_key.clone(),
-        source_ke_pub_key: peer_pub_key,
-        sink_ke_nonce: own_nonce.clone(),
-        source_ke_nonce: peer_nonce.clone(),
-        sink_cert_chain: own_identity.cert_chain.clone(),
-        source_cert_chain: peer_identity.cert_chain.clone(),
+/// A helper function to process the headers of the shared key arcs, verify the given authentication
+/// completed status, extract and return the session id, source identity and sink identity.
+pub fn process_shared_key_arc_headers(
+    protected_headers: &[(Label, Value)],
+    expected_status: &arc::AuthenticationCompleted,
+) -> Result<(SessionIdentifier, Identity, Identity), Error> {
+    let (_, val) = protected_headers
+        .iter()
+        .find(|(l, _v)| *l == arc::SESSION_ID)
+        .ok_or_else(|| ag_err!(InvalidSharedKeyArcs, "session id is missing"))?;
+    let session_id = match val {
+        Value::Bytes(b) => b.clone(),
+        _ => return Err(ag_err!(InvalidSharedKeyArcs, "invalid encoding of session id")),
     };
+    let session_id: SessionIdentifier = session_id
+        .try_into()
+        .map_err(|e| ag_err!(InvalidSharedKeyArcs, "invalid session id: {:?}", e))?;
 
-    let salt = compute_salt(salt_input, &*imp.sha256)?;
-    let (in_encrypt_key, out_encrypt_key, hmac_key) =
-        derive_shared_keys(&ecdh_secret, &salt, Role::Sink, &*imp.hkdf)?;
+    let (_, val) = protected_headers
+        .iter()
+        .find(|(l, _v)| *l == arc::PERMISSIONS)
+        .ok_or_else(|| ag_err!(InvalidSharedKeyArcs, "permissions are missing"))?;
+    let permissions = arc::Permissions::from_cbor_value(val.clone())?;
+    let source_identity = permissions.source_id.ok_or_else(|| {
+        ag_err!(InvalidSharedKeyArcs, "source identity is missing in the permissions")
+    })?;
+    let sink_identity = permissions.sink_id.ok_or_else(|| {
+        ag_err!(InvalidSharedKeyArcs, "sink identity is missing in the permissions")
+    })?;
 
-    let (session_id, signature) = compute_sign_session_id(
-        SessionIdInput { sink_ke_nonce: own_nonce.clone(), source_ke_nonce: peer_nonce },
-        HmacKey(hmac_key.0),
-        sign_key,
-        imp,
-    )?;
-
-    // create two arcs encrypting the two shared encrypting keys with the per-boot-key
-    let shared_keys = create_shared_key_arcs(
-        own_identity.clone(),
-        peer_identity,
-        AesKey(in_encrypt_key.0),
-        AesKey(out_encrypt_key.0),
-        &session_id,
-        arc::AuthenticationCompleted(false),
-        imp,
-    )?;
-
-    Ok(KEInitResult {
-        session_init_info: SessionInitiationInfo {
-            ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
-            identity: own_identity.to_vec()?,
-            nonce: own_nonce.0.to_vec(),
-            version: imp.device.get_sink_version(peer_version),
-        },
-        session_info: SessionInfo { shared_keys, session_id, session_id_signature: signature },
-    })
-}
-
-/// This method is invoked on P1 (source)
-/// This is the third step in the key exchange protocol.
-pub fn finish(
-    imp: &mut TraitImpl,
-    peer_key: &[u8],
-    peer_id: &[u8],
-    peer_sig: &[u8],
-    peer_nonce: &[u8],
-    peer_version: i32,
-    own_ke_key: Key,
-) -> Result<SessionInfo, Error> {
-    if imp.device.get_source_version() < peer_version {
-        ag_err!(IncompatibleProtocolVersion, "peer's protocol version is incompatible");
-    }
-    let pbk = imp.device.get_per_boot_key()?;
-    let mut own_ke_key_arc_content = arc::decipher_arc(
-        &pbk,
-        &own_ke_key.arc_from_pbk.ok_or(ag_err!(InvalidPrivKeyArcInKey, "missing priv key arc"))?,
-        &*imp.aes_gcm,
-    )?;
-
-    let own_ke_nonce = extract_nonce(&own_ke_key_arc_content.protected_headers)?;
-
-    let (peer_pub_key, peer_identity, peer_nonce) =
-        decode_peer_info(peer_key, peer_id, peer_nonce)?;
-
-    let ecdh_secret = compute_shared_secret(
-        &*imp.ecdh,
-        &EcExchangeKeyPriv(take(&mut own_ke_key_arc_content.payload.0)),
-        &peer_pub_key,
-    )?;
-
-    let (sign_key, own_identity) = imp.device.get_identity()?;
-    let own_ke_pub_key = own_ke_key
-        .pub_key
-        .ok_or(ag_err!(InvalidPubKeyInKey, "own public key is missing for key agreement"))?;
-    let own_ke_pub_key = EcExchangeKeyPub(
-        CoseKey::from_slice(&own_ke_pub_key)
-            .map_err(|e| ag_err!(InvalidKeKey, "invalid own key for key agreement: {:?}", e))?,
-    );
-
-    let salt_input = SaltInput {
-        source_version: imp.device.get_source_version(),
-        sink_ke_pub_key: peer_pub_key,
-        source_ke_pub_key: own_ke_pub_key,
-        sink_ke_nonce: peer_nonce.clone(),
-        source_ke_nonce: own_ke_nonce.clone(),
-        sink_cert_chain: peer_identity.cert_chain.clone(),
-        source_cert_chain: own_identity.cert_chain.clone(),
+    let (_, val) = protected_headers
+        .iter()
+        .find(|(l, _v)| *l == arc::AUTHENTICATION_COMPLETE)
+        .ok_or_else(|| ag_err!(InvalidSharedKeyArcs, "authentication complete is missing"))?;
+    let status = match val {
+        Value::Bool(b) => *b,
+        _ => {
+            return Err(ag_err!(
+                InvalidSharedKeyArcs,
+                "invalid encoding of authentication complete"
+            ))
+        }
     };
-
-    let salt = compute_salt(salt_input, &*imp.sha256)?;
-
-    let (in_encrypt_key, out_encrypt_key, hmac_key) =
-        derive_shared_keys(&ecdh_secret, &salt, Role::Source, &*imp.hkdf)?;
-
-    let (session_id, signature) = compute_sign_session_id(
-        SessionIdInput { sink_ke_nonce: peer_nonce, source_ke_nonce: own_ke_nonce },
-        HmacKey(hmac_key.0),
-        sign_key,
-        imp,
-    )?;
-
-    // Process/verify peer's cert chain and the peer's signature on the session id and retrieve the
-    // peer's public signing key
-    let verify_key = imp.device.process_peer_cert_chain(&peer_identity.cert_chain, &*imp.ecdsa)?;
-    verify_signature_on_session_id(&verify_key, &session_id, peer_sig, &*imp.ecdsa)?;
-
-    // create two arcs encrypting the two shared encrypting keys with the per-boot-key
-    let shared_keys = create_shared_key_arcs(
-        peer_identity,
-        own_identity,
-        AesKey(in_encrypt_key.0),
-        AesKey(out_encrypt_key.0),
-        &session_id,
-        arc::AuthenticationCompleted(true),
-        imp,
-    )?;
-
-    Ok(SessionInfo { shared_keys, session_id, session_id_signature: signature })
-}
-
-/// This is invoked on P2 (sink)
-pub fn authentication_complete(
-    imp: &mut TraitImpl,
-    peer_sig: &[u8],
-    shared_keys: [Vec<u8>; 2],
-) -> Result<[Vec<u8>; 2], Error> {
-    let in_key_arc = &shared_keys[0];
-    let out_key_arc = &shared_keys[1];
-
-    let pbk = imp.device.get_per_boot_key()?;
-
-    let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*imp.aes_gcm)?;
-    let (in_session_id, in_source_identity) =
-        process_shared_key_arc_headers(&in_key_arc_content.protected_headers)?;
-
-    let out_key_arc_content = arc::decipher_arc(&pbk, out_key_arc, &*imp.aes_gcm)?;
-    let (out_session_id, out_source_identity) =
-        process_shared_key_arc_headers(&out_key_arc_content.protected_headers)?;
-
-    if in_session_id != out_session_id {
-        return Err(ag_err!(InvalidSharedKeyArcs, "session id mismatch"));
+    if status != expected_status.0 {
+        return Err(ag_err!(InvalidSharedKeyArcs, "invalid authentication complete status"));
     }
-
-    if in_source_identity != out_source_identity {
-        return Err(ag_err!(InvalidSharedKeyArcs, "peer identity mismatch"));
-    }
-
-    let peer_identity = Identity::from_slice(&in_source_identity)?;
-
-    // Process/verify peer's cert chain and the peer's signature on the session id
-    let verify_key = imp.device.process_peer_cert_chain(&peer_identity.cert_chain, &*imp.ecdsa)?;
-    verify_signature_on_session_id(&verify_key, &in_session_id, peer_sig, &*imp.ecdsa)?;
-
-    let updated_shared_key_arcs =
-        auth_complete_shared_key_arcs(in_key_arc_content, out_key_arc_content, imp)?;
-
-    Ok(updated_shared_key_arcs)
+    Ok((session_id, source_identity, sink_identity))
 }
 
 fn decode_peer_info(
@@ -308,10 +760,10 @@ fn decode_peer_info(
     identity: &[u8],
     nonce: &[u8],
 ) -> Result<(EcExchangeKeyPub, Identity, Nonce16), Error> {
-    let pub_key = EcExchangeKeyPub(
-        CoseKey::from_slice(pub_key)
-            .map_err(|e| ag_err!(InvalidKeKey, "invalid peer key for key agreement: {:?}", e))?,
-    );
+    let pub_key =
+        EcExchangeKeyPub(CoseKey::from_slice(pub_key).map_err(|e| {
+            ag_err!(InvalidPeerKeKey, "invalid peer key for key agreement: {:?}", e)
+        })?);
     let identity = Identity::from_slice(identity)
         .map_err(|e| ag_err!(InvalidIdentity, "invalid peer identity: {:?}", e))?;
     let nonce = Nonce16(
@@ -335,13 +787,13 @@ fn compute_shared_secret(
     ecdh.compute_shared_secret(own_key, peer_key)
 }
 
-fn compute_salt(salt_input: SaltInput, sha_256: &dyn Sha256) -> Result<[u8; 32], Error> {
+fn compute_salt(salt_input: SaltInput, sha_256: &dyn Sha256) -> Result<[u8; SHA_256_LEN], Error> {
     sha_256.compute_sha256(&salt_input.to_vec()?)
 }
 
 fn derive_shared_keys(
     ecdh_secret: &EcdhSecret,
-    salt: &[u8; 32],
+    salt: &[u8; SHA_256_LEN],
     role: Role,
     hkdf: &dyn Hkdf,
 ) -> Result<(PseudoRandKey, PseudoRandKey, PseudoRandKey), Error> {
@@ -361,139 +813,6 @@ fn derive_shared_keys(
     }
 }
 
-fn compute_sign_session_id(
-    session_id_input: SessionIdInput,
-    hmac_key: HmacKey,
-    sign_key: Option<EcSignKey>,
-    imp: &mut TraitImpl,
-) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let session_id = imp.hmac.compute_hmac(&hmac_key, &session_id_input.to_vec()?)?;
-
-    // Construct `CoseSign1`
-    let protected = HeaderBuilder::new().algorithm(imp.device.get_cose_sign_algorithm()).build();
-    let cose_sign1 = CoseSign1Builder::new()
-        .protected(protected)
-        .try_create_detached_signature(&session_id, &[], |input| match sign_key {
-            Some(key) => imp.ecdsa.sign(&key, input),
-            None => imp.device.sign_data(&*imp.ecdsa, input),
-        })?
-        .build();
-
-    Ok((session_id, cose_sign1.to_vec()?))
-}
-
-fn verify_signature_on_session_id(
-    verify_key: &EcVerifyKey,
-    session_id: &[u8],
-    signature: &[u8],
-    ecdsa: &dyn EcDsa,
-) -> Result<(), Error> {
-    let cose_sign1 = CoseSign1::from_slice(signature)?;
-    match verify_key {
-        EcVerifyKey::Ed25519(cose_key) => {
-            check_cose_key_params(
-                cose_key,
-                iana::KeyType::OKP,
-                iana::Algorithm::EdDSA,
-                iana::EllipticCurve::Ed25519,
-                ErrorCode::InvalidCertChain,
-            )?;
-        }
-        EcVerifyKey::P256(cose_key) => {
-            check_cose_key_params(
-                cose_key,
-                iana::KeyType::EC2,
-                iana::Algorithm::ES256, // ECDSA
-                iana::EllipticCurve::P_256,
-                ErrorCode::InvalidCertChain,
-            )?;
-        }
-        EcVerifyKey::P384(cose_key) => {
-            check_cose_key_params(
-                cose_key,
-                iana::KeyType::EC2,
-                iana::Algorithm::ES384,
-                iana::EllipticCurve::P_384,
-                ErrorCode::InvalidCertChain,
-            )?;
-        }
-    }
-    cose_sign1.verify_detached_signature(session_id, &[], |signature, data| {
-        ecdsa.verify_signature(verify_key, data, signature)
-    })
-}
-
-fn create_shared_key_arcs(
-    sink_id: Identity,
-    source_id: Identity,
-    in_encrypt_key: AesKey,
-    out_encrypt_key: AesKey,
-    session_id: &[u8],
-    auth_complete: arc::AuthenticationCompleted,
-    imp: &mut TraitImpl,
-) -> Result<[Vec<u8>; 2], Error> {
-    let pbk = match auth_complete.0 {
-        false => imp.device.get_or_create_per_boot_key(&*imp.aes_gcm, &mut *imp.rng)?,
-        true => imp.device.get_per_boot_key()?,
-    };
-
-    // auth complete protected header
-    let auth_complete_hdr = (arc::AUTHENTICATION_COMPLETE, Value::Bool(auth_complete.0));
-    // session id protected header
-    let session_id_hdr = (arc::SESSION_ID, Value::Bytes(try_to_vec(session_id)?));
-    // direction of encryption
-    let in_direction_hdr =
-        (arc::DIRECTION, Value::Integer((arc::DirectionOfEncryption::In as i32).into()));
-    // permissions header
-    let permissions_encoded = arc::Permissions {
-        source_id: Some(source_id),
-        sink_id: Some(sink_id),
-        ..Default::default()
-    }
-    .to_cbor_value()?;
-    let permission_hdr = (arc::PERMISSIONS, permissions_encoded);
-
-    let mut in_protected_headers = Vec::<(Label, Value)>::new();
-    in_protected_headers.try_reserve(4)?;
-    in_protected_headers.push(auth_complete_hdr.clone());
-    in_protected_headers.push(session_id_hdr.clone());
-    in_protected_headers.push(permission_hdr.clone());
-    in_protected_headers.push(in_direction_hdr);
-
-    let in_encrypt_key_arc = arc::create_arc(
-        &pbk,
-        arc::ArcContent {
-            payload: ArcPayload(in_encrypt_key.0.to_vec()),
-            protected_headers: in_protected_headers,
-            ..Default::default()
-        },
-        &*imp.aes_gcm,
-        &mut *imp.rng,
-    )?;
-
-    // direction of encryption
-    let out_direction_hdr =
-        (arc::DIRECTION, Value::Integer((arc::DirectionOfEncryption::Out as i32).into()));
-    let mut out_protected_headers = Vec::<(Label, Value)>::new();
-    out_protected_headers.try_reserve(4)?;
-    out_protected_headers.push(auth_complete_hdr);
-    out_protected_headers.push(session_id_hdr);
-    out_protected_headers.push(permission_hdr);
-    out_protected_headers.push(out_direction_hdr);
-
-    let out_encrypt_key_arc = arc::create_arc(
-        &pbk,
-        arc::ArcContent {
-            payload: ArcPayload(out_encrypt_key.0.to_vec()),
-            protected_headers: out_protected_headers,
-            ..Default::default()
-        },
-        &*imp.aes_gcm,
-        &mut *imp.rng,
-    )?;
-    Ok([in_encrypt_key_arc, out_encrypt_key_arc])
-}
-
 /// Process the given protected headers of an arc and return the nonce used for key agreement
 pub fn extract_nonce(protected_headers: &[(Label, Value)]) -> Result<Nonce16, Error> {
     for (label, val) in protected_headers {
@@ -510,7 +829,7 @@ pub fn extract_nonce(protected_headers: &[(Label, Value)]) -> Result<Nonce16, Er
                 }
                 _ => {
                     return Err(ag_err!(
-                        InvalidPubKeyInKey,
+                        InvalidPrivKeyArcInKey,
                         "invalid encoding of own nonce for key agreement"
                     ))
                 }
@@ -519,52 +838,4 @@ pub fn extract_nonce(protected_headers: &[(Label, Value)]) -> Result<Nonce16, Er
     }
 
     Err(ag_err!(InvalidPrivKeyArcInKey, "nonce for key agreement is missing in the headers"))
-}
-
-/// Return the session id and the source identity for verifications done in
-/// `authentication_complete`.
-pub fn process_shared_key_arc_headers(
-    protected_headers: &[(Label, Value)],
-) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let mut session_id = None;
-    let mut permissions = None;
-
-    for (label, val) in protected_headers {
-        if *label == arc::SESSION_ID {
-            match val {
-                Value::Bytes(ref b) => session_id = Some(b).cloned(),
-                _ => return Err(ag_err!(InvalidSharedKeyArcs, "invalid encoding of session id")),
-            }
-        }
-        if *label == arc::PERMISSIONS {
-            permissions = Some(arc::Permissions::from_cbor_value(val.clone())?);
-        }
-    }
-    Ok((
-        session_id.ok_or(ag_err!(InvalidSharedKeyArcs, "session id is missing"))?,
-        permissions
-            .ok_or(ag_err!(InvalidSharedKeyArcs, "permissions are missing"))?
-            .source_id
-            .ok_or(ag_err!(InvalidSharedKeyArcs, "source identity is missing in the permissions"))?
-            .to_vec()?,
-    ))
-}
-
-/// Update the `authentication_complete` protected header in both arcs to be true
-pub fn auth_complete_shared_key_arcs(
-    mut in_arc_content: arc::ArcContent,
-    mut out_arc_content: arc::ArcContent,
-    imp: &mut TraitImpl,
-) -> Result<[Vec<u8>; 2], Error> {
-    in_arc_content.protected_headers.retain(|v| v.0 != arc::AUTHENTICATION_COMPLETE);
-    out_arc_content.protected_headers.retain(|v| v.0 != arc::AUTHENTICATION_COMPLETE);
-
-    let auth_complete_hdr = (arc::AUTHENTICATION_COMPLETE, Value::Bool(true));
-    in_arc_content.protected_headers.try_push(auth_complete_hdr.clone())?;
-    out_arc_content.protected_headers.try_push(auth_complete_hdr)?;
-
-    let pbk = imp.device.get_per_boot_key()?;
-    let in_encrypt_key_arc = arc::create_arc(&pbk, in_arc_content, &*imp.aes_gcm, &mut *imp.rng)?;
-    let out_encrypt_key_arc = arc::create_arc(&pbk, out_arc_content, &*imp.aes_gcm, &mut *imp.rng)?;
-    Ok([in_encrypt_key_arc, out_encrypt_key_arc])
 }

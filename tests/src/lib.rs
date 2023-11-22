@@ -5,9 +5,8 @@ use authgraph_core::key::{
     AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Key, Nonce12, PseudoRandKey,
 };
 use authgraph_core::keyexchange;
-use authgraph_core::traits::{
-    AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256, TraitImpl,
-};
+use authgraph_core::traits::{AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256};
+use authgraph_wire::ErrorCode;
 use coset::{cbor::Value, iana, CoseKeyBuilder};
 
 /// Test basic [`Rng`] functionality.
@@ -448,8 +447,8 @@ fn test_ecdsa_round_trip<E: EcDsa>(ecdsa: &E, verify_key: &EcVerifyKey, sign_key
 }
 
 /// Test `create` method of key exchange protocol
-pub fn test_key_exchange_create(imp: &mut TraitImpl) {
-    let create_result = keyexchange::create(imp);
+pub fn test_key_exchange_create(source: &mut keyexchange::AuthGraphParticipant) {
+    let create_result = source.create();
     assert!(create_result.is_ok());
 
     // TODO: Add more tests on the values returned from `create` (some of these tests may
@@ -467,35 +466,36 @@ pub fn test_key_exchange_create(imp: &mut TraitImpl) {
 }
 
 /// Test `init` method of key exchange protocol
-pub fn test_key_exchange_init(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+pub fn test_key_exchange_init(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
     let keyexchange::SessionInitiationInfo {
         ke_key: Key { pub_key: peer_ke_pub_key, .. },
         identity: peer_identity,
         nonce: peer_nonce,
         version: peer_version,
-    } = keyexchange::create(p1_imp).unwrap();
+    } = source.create().unwrap();
 
-    let init_result = keyexchange::init(
-        p2_imp,
-        &peer_ke_pub_key.unwrap(),
-        &peer_identity,
-        &peer_nonce,
-        peer_version,
-    );
+    let init_result =
+        sink.init(&peer_ke_pub_key.unwrap(), &peer_identity, &peer_nonce, peer_version);
     assert!(init_result.is_ok())
     // TODO: add more tests on init_result
 }
 
 /// Test `finish` method of key exchange protocol
-pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+pub fn test_key_exchange_finish(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
     let keyexchange::SessionInitiationInfo {
         ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
         identity: p1_identity,
         nonce: p1_nonce,
         version: p1_version,
-    } = keyexchange::create(p1_imp).unwrap();
+    } = source.create().unwrap();
 
-    let keyexchange::KEInitResult {
+    let keyexchange::KeInitResult {
         session_init_info:
             keyexchange::SessionInitiationInfo {
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
@@ -504,17 +504,9 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
                 version: p2_version,
             },
         session_info: keyexchange::SessionInfo { session_id_signature: p2_signature, .. },
-    } = keyexchange::init(
-        p2_imp,
-        p1_ke_pub_key.as_ref().unwrap(),
-        &p1_identity,
-        &p1_nonce,
-        p1_version,
-    )
-    .unwrap();
+    } = sink.init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version).unwrap();
 
-    let finish_result = keyexchange::finish(
-        p1_imp,
+    let finish_result = source.finish(
         &p2_ke_pub_key.unwrap(),
         &p2_identity,
         &p2_signature,
@@ -527,15 +519,18 @@ pub fn test_key_exchange_finish(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) 
 }
 
 /// Test `authentication_complete` method of key exchange protocol
-pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut TraitImpl) {
+pub fn test_key_exchange_auth_complete(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
     let keyexchange::SessionInitiationInfo {
         ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
         identity: p1_identity,
         nonce: p1_nonce,
         version: p1_version,
-    } = keyexchange::create(p1_imp).unwrap();
+    } = source.create().unwrap();
 
-    let keyexchange::KEInitResult {
+    let keyexchange::KeInitResult {
         session_init_info:
             keyexchange::SessionInitiationInfo {
                 ke_key: Key { pub_key: p2_ke_pub_key, .. },
@@ -549,33 +544,270 @@ pub fn test_key_exchange_auth_complete(p1_imp: &mut TraitImpl, p2_imp: &mut Trai
                 session_id: p2_session_id,
                 session_id_signature: p2_signature,
             },
-    } = keyexchange::init(
-        p2_imp,
-        p1_ke_pub_key.as_ref().unwrap(),
-        &p1_identity,
-        &p1_nonce,
-        p1_version,
-    )
-    .unwrap();
+    } = sink.init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version).unwrap();
 
     let keyexchange::SessionInfo {
         shared_keys: _p1_shared_keys,
         session_id: p1_session_id,
         session_id_signature: p1_signature,
-    } = keyexchange::finish(
-        p1_imp,
+    } = source
+        .finish(
+            &p2_ke_pub_key.unwrap(),
+            &p2_identity,
+            &p2_signature,
+            &p2_nonce,
+            p2_version,
+            Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        )
+        .unwrap();
+
+    let auth_complete_result = sink.authentication_complete(&p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+    // TODO: add more tests on finish_result, and encrypt/decrypt using the agreed keys
+}
+
+/// Verify that the key exchange protocol works when source's version is higher than sink's version
+/// and that the negotiated version is sink's version
+pub fn test_ke_with_newer_source(
+    source_newer: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
+    let source_version = source_newer.get_version();
+    let sink_version = sink.get_version();
+    assert!(source_version > sink_version);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = source_newer.create().unwrap();
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = sink.init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version).unwrap();
+    assert_eq!(p2_version, sink_version);
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = source_newer
+        .finish(
+            &p2_ke_pub_key.unwrap(),
+            &p2_identity,
+            &p2_signature,
+            &p2_nonce,
+            p2_version,
+            Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        )
+        .unwrap();
+
+    let auth_complete_result = sink.authentication_complete(&p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+}
+
+/// Verify that the key exchange protocol works when sink's version is higher than sources's version
+/// and that the negotiated version is source's version
+pub fn test_ke_with_newer_sink(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink_newer: &mut keyexchange::AuthGraphParticipant,
+) {
+    let source_version = source.get_version();
+    let sink_version = sink_newer.get_version();
+    assert!(sink_version > source_version);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = source.create().unwrap();
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = sink_newer
+        .init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version)
+        .unwrap();
+    assert_eq!(p2_version, source_version);
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = source
+        .finish(
+            &p2_ke_pub_key.unwrap(),
+            &p2_identity,
+            &p2_signature,
+            &p2_nonce,
+            p2_version,
+            Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        )
+        .unwrap();
+
+    let auth_complete_result = sink_newer.authentication_complete(&p1_signature, p2_shared_keys);
+    assert!(auth_complete_result.is_ok());
+    assert_eq!(p1_session_id, p2_session_id)
+}
+
+/// Verify that the key exchange protocol prevents version downgrade attacks when both source and
+/// sink have versions newer than version 1
+pub fn test_ke_for_version_downgrade(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
+    let source_version = source.get_version();
+    let sink_version = sink.get_version();
+    assert!(source_version > 1);
+    assert!(sink_version > 1);
+
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: _p1_version,
+    } = source.create().unwrap();
+
+    let downgraded_version = 1;
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: _p2_shared_keys,
+                session_id: _p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = sink
+        .init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, downgraded_version)
+        .unwrap();
+    assert_eq!(p2_version, downgraded_version);
+
+    let finish_result = source.finish(
         &p2_ke_pub_key.unwrap(),
         &p2_identity,
         &p2_signature,
         &p2_nonce,
         p2_version,
         Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
-    )
-    .unwrap();
+    );
+    // `finish` should fail with signature verification error
+    match finish_result {
+        Ok(_) => panic!("protocol downgrade prevention is broken"),
+        Err(e) => match e {
+            Error(ErrorCode::InvalidSignature, _) => {}
+            _ => panic!("wrong error on protocol downgrade"),
+        },
+    }
+}
 
-    let auth_complete_result =
-        keyexchange::authentication_complete(p2_imp, &p1_signature, p2_shared_keys);
+/// Verify that the key exchange protocol prevents replay attacks
+pub fn test_ke_for_replay(
+    source: &mut keyexchange::AuthGraphParticipant,
+    sink: &mut keyexchange::AuthGraphParticipant,
+) {
+    // Round 1 of the protocol
+    let keyexchange::SessionInitiationInfo {
+        ke_key: Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+        identity: p1_identity,
+        nonce: p1_nonce,
+        version: p1_version,
+    } = source.create().unwrap();
+
+    let keyexchange::KeInitResult {
+        session_init_info:
+            keyexchange::SessionInitiationInfo {
+                ke_key: Key { pub_key: p2_ke_pub_key, .. },
+                identity: p2_identity,
+                nonce: p2_nonce,
+                version: p2_version,
+            },
+        session_info:
+            keyexchange::SessionInfo {
+                shared_keys: p2_shared_keys,
+                session_id: p2_session_id,
+                session_id_signature: p2_signature,
+            },
+    } = sink.init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version).unwrap();
+
+    let keyexchange::SessionInfo {
+        shared_keys: _p1_shared_keys,
+        session_id: p1_session_id,
+        session_id_signature: p1_signature,
+    } = source
+        .finish(
+            &p2_ke_pub_key.clone().unwrap(),
+            &p2_identity,
+            &p2_signature,
+            &p2_nonce,
+            p2_version,
+            Key { pub_key: p1_ke_pub_key.clone(), arc_from_pbk: p1_ke_priv_key_arc.clone() },
+        )
+        .unwrap();
+
+    let auth_complete_result = sink.authentication_complete(&p1_signature, p2_shared_keys.clone());
     assert!(auth_complete_result.is_ok());
-    assert_eq!(p1_session_id, p2_session_id)
-    // TODO: add more tests on finish_result, and encrypt/decrypt using the agreed keys
+    assert_eq!(p1_session_id, p2_session_id);
+
+    // An attacker may try to run the key exchange protocol again, but this time, they try to
+    // replay the inputs of the previous protocol run, ignoring the outputs of `create` and `init`
+    // of the existing protocol run. In such cases, `finish` and `authentication_complete` should
+    // fail as per the measures against replay attacks.
+    source.create().unwrap();
+
+    sink.init(p1_ke_pub_key.as_ref().unwrap(), &p1_identity, &p1_nonce, p1_version).unwrap();
+
+    let finish_result = source.finish(
+        &p2_ke_pub_key.unwrap(),
+        &p2_identity,
+        &p2_signature,
+        &p2_nonce,
+        p2_version,
+        Key { pub_key: p1_ke_pub_key, arc_from_pbk: p1_ke_priv_key_arc },
+    );
+    match finish_result {
+        Ok(_) => panic!("replay prevention is broken in finish"),
+        Err(e) if e.0 == ErrorCode::InvalidKeKey => {}
+        Err(e) => panic!("got error {e:?}, wanted ErrorCode::InvalidKeKey"),
+    }
+
+    let auth_complete_result = sink.authentication_complete(&p1_signature, p2_shared_keys);
+    match auth_complete_result {
+        Ok(_) => panic!("replay prevention is broken in authentication_complete"),
+        Err(e) if e.0 == ErrorCode::InvalidSharedKeyArcs => {}
+        Err(e) => panic!("got error {e:?}, wanted ErrorCode::InvalidSharedKeyArcs"),
+    }
 }

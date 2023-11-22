@@ -16,7 +16,7 @@
 
 //! Traits representing crypto abstractions and device specific functionality.
 use crate::ag_err;
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
 use crate::key::{
     AesKey, CertChain, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
     EcdhSecret, HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
@@ -24,13 +24,14 @@ use crate::key::{
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use authgraph_wire::ErrorCode;
 use coset::iana::Algorithm;
 
 /// The first version of the AuthGraph key exchange protocol
 pub const AG_KEY_EXCHANGE_PROTOCOL_VERSION_1: i32 = 1;
 
 /// These trait implementations must be provided by an implementation of the Authgraph API.
-pub struct TraitImpl {
+pub struct CryptoTraitImpl {
     /// Implementation of AES-GCM functionality.
     pub aes_gcm: Box<dyn AesGcm>,
     /// Implementation of ECDH functionality
@@ -45,15 +46,10 @@ pub struct TraitImpl {
     pub sha256: Box<dyn Sha256>,
     /// Implementation of secure random number generation
     pub rng: Box<dyn Rng>,
-    /// Implementation of device specific trait methods
-    pub device: Box<dyn Device>,
-    /// Implementation of the trait for the clock to get the time, in order to add timestamp in the
-    /// header of certain arcs created by the sources
-    pub clock: Option<Box<dyn MonotonicClock>>,
 }
 
 /// Trait methods for AES-GCM with 256 bit key (and 16 bytes tag).
-pub trait AesGcm {
+pub trait AesGcm: Send {
     /// Generate a key
     fn generate_key(&self, rng: &mut dyn Rng) -> Result<AesKey, Error> {
         let mut key = AesKey([0; 32]);
@@ -79,7 +75,7 @@ pub trait AesGcm {
 }
 
 /// Trait methods for ECDH key exchange with P256 curve
-pub trait EcDh {
+pub trait EcDh: Send {
     /// Generate an EC key with P256 curve for ECDH
     fn generate_key(&self) -> Result<EcExchangeKey, Error>;
     /// Compute the ECDH secret. You can safely assume that the `CoseKey` of `EcExchangeKeyPub` has
@@ -93,7 +89,7 @@ pub trait EcDh {
 
 /// Trait methods for EC sign/verify with EdDSA (with Ed25519 curve) and ECDSA (with P256 curve and
 /// SHA-256 digest, and P384 curve and SHA-384 digest).
-pub trait EcDsa {
+pub trait EcDsa: Send {
     /// Compute signature over the given data, using the given EC private key. You can mark this as
     /// unimplemented and instead implement the `sign_data` method in the `Device` trait if the
     /// private signing key is not readily available (i.e. `get_identity` in the `Device` trait
@@ -110,13 +106,13 @@ pub trait EcDsa {
 }
 
 /// Trait method for computing HMAC with 256-bit key and SHA-256 digest
-pub trait Hmac {
+pub trait Hmac: Send {
     /// Compute HMAC over the given data using the given key
     fn compute_hmac(&self, key: &HmacKey, data: &[u8]) -> Result<Vec<u8>, Error>;
 }
 
 /// Trait methods for extract and expand used in the key derivation process
-pub trait Hkdf {
+pub trait Hkdf: Send {
     /// Extract step in key derivation
     fn extract(&self, salt: &[u8], ikm: &EcdhSecret) -> Result<PseudoRandKey, Error>;
     /// Expand step in key derivation
@@ -124,19 +120,19 @@ pub trait Hkdf {
 }
 
 /// Trait method for computing cryptographic hash function on an input that outputs 256-bit hash.
-pub trait Sha256 {
+pub trait Sha256: Send {
     /// Compute SHA256 over an input
     fn compute_sha256(&self, data: &[u8]) -> Result<[u8; 32], Error>;
 }
 
 /// Trait methods for generating cryptographically secure random numbers
-pub trait Rng {
+pub trait Rng: Send {
     /// Create a cryptographically secure random bytes
     fn fill_bytes(&mut self, nonce: &mut [u8]);
 }
 
 /// Trait methods for retrieving device specific information and for device specific functionality
-pub trait Device {
+pub trait Device: Send {
     /// Retrieve (or create) the ephemeral (with per-boot life time) 256-bits encryption key to be
     /// used with AES-GCM
     fn get_or_create_per_boot_key(
@@ -186,23 +182,44 @@ pub trait Device {
         latest_identity: &Identity,
         previous_identity: &Identity,
     ) -> Result<IdentityVerificationDecision, Error>;
-    /// Retrieve the latest supported version of the key exchange protocol by the source (P1).
-    /// Implementers of sinks can mark this as `Unimplemented`.
-    fn get_source_version(&self) -> i32 {
+    /// Retrieve the latest supported version of the key exchange protocol.
+    fn get_version(&self) -> i32 {
         // There is only one version now
         AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
     }
-    /// Given the latest supported version supported by the source, retrieve the version supported
-    /// by the sink. Implementers of the sources can mark this as `Unimplemented`.
-    fn get_sink_version(&self, _peer_version: i32) -> i32 {
+    /// Given the latest supported version supported by the peer, select the matching version. This
+    /// is relevant only when there are multiple versions of the protocol and a given party supports
+    /// multiple versions. This is called on sink, as sink is the one who picks the matching version
+    /// based on source's version.
+    fn get_negotiated_version(&self, _peer_version: i32) -> i32 {
         // There is only one version now
         AG_KEY_EXCHANGE_PROTOCOL_VERSION_1
     }
+    /// An internal entry point that hands over the finalized shared key arcs to the device specific
+    /// implementation so that the application protocol that uses the shared keys for secure
+    /// communication can store them in an appropriate way.
+    fn record_shared_sessions(
+        &mut self,
+        peer_identity: &Identity,
+        session_id: &[u8; 32],
+        shared_keys: &[Vec<u8>; 2],
+        sha256: &dyn Sha256,
+    ) -> Result<(), Error>;
+    /// The counterpart of `record_shared_sessions` above. Given arc(s) containing the shared keys,
+    /// validate them against the records created at the end of each key exchange protocol instance.
+    /// The validation logic depends on the application protocol which uses the shared keys.
+    fn validate_shared_sessions(
+        &self,
+        peer_identity: &Identity,
+        session_id: &[u8; 32],
+        shared_keys: &[Vec<u8>],
+        sha256: &dyn Sha256,
+    ) -> Result<(), Error>;
 }
 
 /// Trait method to get current time  w.r.t a monotonic clock since an epoch that is common between
 /// the source and sink.
-pub trait MonotonicClock {
+pub trait MonotonicClock: Send {
     /// Get the current time
     fn now(&self) -> MillisecondsSinceEpoch;
 }
