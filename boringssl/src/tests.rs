@@ -16,7 +16,7 @@
 
 //! Tests for BoringSSL-based implementations of AuthGraph traits.
 
-use authgraph_core::traits;
+use authgraph_core::keyexchange;
 use authgraph_core_test as ag_test;
 
 #[test]
@@ -82,30 +82,112 @@ fn test_p384_round_trip() {
 
 #[test]
 fn test_key_exchange_protocol() {
-    let mut p1_imp = traits::TraitImpl {
-        aes_gcm: Box::new(crate::BoringAes),
-        ecdh: Box::new(crate::BoringEcDh),
-        ecdsa: Box::new(crate::BoringEcDsa),
-        hmac: Box::new(crate::BoringHmac),
-        hkdf: Box::new(crate::BoringHkdf),
-        sha256: Box::new(crate::BoringSha256),
-        rng: Box::new(crate::BoringRng),
-        device: Box::<crate::test_device::AgDevice>::default(),
-        clock: None,
-    };
-    let mut p2_imp = traits::TraitImpl {
-        aes_gcm: Box::new(crate::BoringAes),
-        ecdh: Box::new(crate::BoringEcDh),
-        ecdsa: Box::new(crate::BoringEcDsa),
-        hmac: Box::new(crate::BoringHmac),
-        hkdf: Box::new(crate::BoringHkdf),
-        sha256: Box::new(crate::BoringSha256),
-        rng: Box::new(crate::BoringRng),
-        device: Box::<crate::test_device::AgDevice>::default(),
-        clock: None,
-    };
-    ag_test::test_key_exchange_create(&mut p1_imp);
-    ag_test::test_key_exchange_init(&mut p1_imp, &mut p2_imp);
-    ag_test::test_key_exchange_finish(&mut p1_imp, &mut p2_imp);
-    ag_test::test_key_exchange_auth_complete(&mut p1_imp, &mut p2_imp);
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::<crate::test_device::AgDevice>::default(),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_create(&mut source);
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::<crate::test_device::AgDevice>::default(),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_init(&mut source, &mut sink);
+    ag_test::test_key_exchange_finish(&mut source, &mut sink);
+    ag_test::test_key_exchange_auth_complete(&mut source, &mut sink);
+}
+
+#[test]
+fn test_ke_with_newer_source() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(2);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(1);
+
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(source_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(sink_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    ag_test::test_ke_with_newer_source(&mut source, &mut sink);
+}
+
+#[test]
+fn test_ke_with_newer_sink() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(1);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(2);
+
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(source_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(sink_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    ag_test::test_ke_with_newer_sink(&mut source, &mut sink);
+}
+
+#[test]
+fn test_ke_for_protocol_downgrade() {
+    let source_device = crate::test_device::AgDevice::default();
+    source_device.set_version(2);
+
+    let sink_device = crate::test_device::AgDevice::default();
+    sink_device.set_version(2);
+
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(source_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::new(sink_device),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+
+    ag_test::test_ke_for_version_downgrade(&mut source, &mut sink);
+}
+
+#[test]
+fn test_ke_for_replay() {
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::<crate::test_device::AgDevice>::default(),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Box::<crate::test_device::AgDevice>::default(),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_ke_for_replay(&mut source, &mut sink);
 }
