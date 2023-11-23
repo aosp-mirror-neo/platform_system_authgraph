@@ -25,7 +25,7 @@ use authgraph_core::{
     },
     traits,
 };
-use authgraph_wire::ErrorCode;
+use authgraph_wire::{ErrorCode, SESSION_ID_LEN};
 use core::cell::RefCell;
 use coset::iana;
 
@@ -137,7 +137,7 @@ impl traits::Device for AgDevice {
     fn record_shared_sessions(
         &mut self,
         _peer_identity: &Identity,
-        _session_id: &[u8; 32],
+        _session_id: &[u8; SESSION_ID_LEN],
         _shared_keys: &[Vec<u8>; 2],
         _sha256: &dyn traits::Sha256,
     ) -> Result<(), Error> {
@@ -149,7 +149,7 @@ impl traits::Device for AgDevice {
     fn validate_shared_sessions(
         &self,
         _peer_identity: &Identity,
-        _session_id: &[u8; 32],
+        _session_id: &[u8; SESSION_ID_LEN],
         _shared_keys: &[Vec<u8>],
         _sha256: &dyn traits::Sha256,
     ) -> Result<(), Error> {

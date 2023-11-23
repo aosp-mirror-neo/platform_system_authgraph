@@ -47,7 +47,7 @@ macro_rules! ossl {
 
 mod aes;
 pub use aes::BoringAes;
-mod ec;
+pub mod ec;
 pub use ec::BoringEcDh;
 pub use ec::BoringEcDsa;
 mod hmac;

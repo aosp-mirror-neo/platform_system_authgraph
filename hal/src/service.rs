@@ -26,7 +26,6 @@ use android_hardware_security_authgraph::aidl::android::hardware::security::auth
 use authgraph_wire as wire;
 use log::{error, warn};
 use std::ffi::CString;
-use std::sync::{self, Mutex, MutexGuard};
 use wire::{
     cbor::{AsCborValue, CborError},
     Code, ErrorCode, PerformOpReq, PerformOpResponse, PerformOpRsp,
@@ -44,25 +43,18 @@ pub fn failed_cbor(err: CborError) -> binder::Status {
 /// Implementation of the AuthGraph key exchange HAL service, communicating with a TA
 /// in a secure environment via a communication channel.
 pub struct AuthGraphService<T: SerializedChannel + 'static> {
-    channel: sync::Arc<Mutex<T>>,
+    channel: T,
 }
 
 impl<T: SerializedChannel + 'static> AuthGraphService<T> {
     /// Construct a new instance that uses the provided channel.
-    pub fn new(channel: sync::Arc<Mutex<T>>) -> Self {
+    pub fn new(channel: T) -> Self {
         Self { channel }
     }
 
     /// Create a new instance wrapped in a proxy object.
-    pub fn new_as_binder(
-        channel: sync::Arc<Mutex<T>>,
-    ) -> binder::Strong<dyn IAuthGraphKeyExchange> {
+    pub fn new_as_binder(channel: T) -> binder::Strong<dyn IAuthGraphKeyExchange> {
         BnAuthGraphKeyExchange::new_binder(Self::new(channel), binder::BinderFeatures::default())
-    }
-
-    /// Return the underlying channel.
-    fn channel(&self) -> MutexGuard<T> {
-        self.channel.lock().unwrap()
     }
 
     /// Execute the given request, by serializing it and sending it down the internal channel.  Then
@@ -81,7 +73,7 @@ impl<T: SerializedChannel + 'static> AuthGraphService<T> {
         }
 
         // Pass the request to the channel, and read the response.
-        let rsp_data = self.channel().execute(&req_data)?;
+        let rsp_data = self.channel.execute(&req_data)?;
 
         let outer_rsp = PerformOpResponse::from_slice(&rsp_data).map_err(failed_cbor)?;
         if outer_rsp.error_code != ErrorCode::Ok {
