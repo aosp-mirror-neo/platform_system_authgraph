@@ -15,11 +15,11 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Tests for BoringSSL-based implementations of AuthGraph traits.
-
 use alloc::rc::Rc;
-use authgraph_core::keyexchange;
+use authgraph_core::{key::Identity, keyexchange};
 use authgraph_core_test as ag_test;
 use core::cell::RefCell;
+use coset::{iana, CborSerializable};
 
 #[test]
 fn test_rng() {
@@ -192,4 +192,68 @@ fn test_ke_for_replay() {
     )
     .unwrap();
     ag_test::test_ke_for_replay(&mut source, &mut sink);
+}
+
+#[test]
+fn test_identity_validation() {
+    ag_test::validate_identity(&crate::BoringEcDsa);
+}
+
+#[test]
+fn test_key_exchange_with_non_empty_dice_chains() {
+    // Both parties have identities containing a DICE certificate chains of non-zero length.
+    let source_device = crate::test_device::AgDevice::default();
+    let (source_pvt_sign_key, source_cbor_identity) = ag_test::create_identity(4).unwrap();
+    let source_identity = Identity::from_slice(&source_cbor_identity).unwrap();
+    source_device.set_identity((source_pvt_sign_key, source_identity), iana::Algorithm::EdDSA);
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Rc::new(RefCell::new(source_device)),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_create(&mut source);
+    let sink_device = crate::test_device::AgDevice::default();
+    let (sink_pvt_sign_key, sink_cbor_identity) = ag_test::create_identity(5).unwrap();
+    let sink_identity = Identity::from_slice(&sink_cbor_identity).unwrap();
+    sink_device.set_identity((sink_pvt_sign_key, sink_identity), iana::Algorithm::EdDSA);
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Rc::new(RefCell::new(sink_device)),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_init(&mut source, &mut sink);
+    ag_test::test_key_exchange_finish(&mut source, &mut sink);
+    ag_test::test_key_exchange_auth_complete(&mut source, &mut sink);
+}
+
+#[test]
+fn test_key_exchange_with_mixed_dice_chains() {
+    // One party has an identity with an empty DICE certificate chain and the other party has an
+    // identity with DICE certificate chainss of non-zero length.
+    let source_device = crate::test_device::AgDevice::default();
+    let (source_pvt_sign_key, source_cbor_identity) = ag_test::create_identity(0).unwrap();
+    let source_identity = Identity::from_slice(&source_cbor_identity).unwrap();
+    source_device.set_identity((source_pvt_sign_key, source_identity), iana::Algorithm::EdDSA);
+    let mut source = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Rc::new(RefCell::new(source_device)),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_create(&mut source);
+    let sink_device = crate::test_device::AgDevice::default();
+    let (sink_pvt_sign_key, sink_cbor_identity) = ag_test::create_identity(5).unwrap();
+    let sink_identity = Identity::from_slice(&sink_cbor_identity).unwrap();
+    sink_device.set_identity((sink_pvt_sign_key, sink_identity), iana::Algorithm::EdDSA);
+    let mut sink = keyexchange::AuthGraphParticipant::new(
+        crate::crypto_trait_impls(),
+        Rc::new(RefCell::new(sink_device)),
+        keyexchange::MAX_OPENED_SESSIONS,
+    )
+    .unwrap();
+    ag_test::test_key_exchange_init(&mut source, &mut sink);
+    ag_test::test_key_exchange_finish(&mut source, &mut sink);
+    ag_test::test_key_exchange_auth_complete(&mut source, &mut sink);
 }

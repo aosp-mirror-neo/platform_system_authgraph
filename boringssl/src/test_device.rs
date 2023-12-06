@@ -33,6 +33,7 @@ use coset::iana;
 pub struct AgDevice {
     per_boot_key: RefCell<Option<AesKey>>,
     identity: RefCell<Option<(EcSignKey, Identity)>>,
+    cose_sign_algorithm: RefCell<Option<iana::Algorithm>>,
     // Make the (source/sink) version configurable for testing purposes
     version: RefCell<i32>,
 }
@@ -42,8 +43,21 @@ impl Default for AgDevice {
         AgDevice {
             per_boot_key: RefCell::new(None),
             identity: RefCell::new(None),
+            cose_sign_algorithm: RefCell::new(None),
             version: RefCell::new(1),
         }
+    }
+}
+
+impl AgDevice {
+    /// Set the given identity
+    pub fn set_identity(
+        &self,
+        identity: (EcSignKey, Identity),
+        cose_sign_algorithm: iana::Algorithm,
+    ) {
+        *self.identity.borrow_mut() = Some(identity);
+        *self.cose_sign_algorithm.borrow_mut() = Some(cose_sign_algorithm);
     }
 }
 
@@ -72,8 +86,9 @@ impl traits::Device for AgDevice {
             .ok_or(ag_err!(InternalError, "per boot key is missing"))
     }
 
-    /// The default implementation outputs identity with a ExplicitKeyDiceCertChain that only
-    /// contains a DiceCertChainInitialPayload (i.e. no DiceChainEntry) and without a policy.
+    /// If the `identity` field is not set (e.g. via `set_identity`), the default implementation
+    /// creates identity with a ExplicitKeyDiceCertChain that only contains a
+    /// DiceCertChainInitialPayload (i.e. no DiceChainEntry) and without a policy.
     /// DiceCertChainInitialPayload is an EC public key on P-256 curve in the default implementation
     fn get_identity(&self) -> Result<(Option<EcSignKey>, Identity), Error> {
         if self.identity.borrow().is_none() {
@@ -88,7 +103,7 @@ impl traits::Device for AgDevice {
                 },
                 policy: None,
             };
-            *self.identity.borrow_mut() = Some((EcSignKey::P256(priv_key), identity))
+            self.set_identity((EcSignKey::P256(priv_key), identity), iana::Algorithm::ES256);
         }
         let (sign_key, identity) = self
             .identity
@@ -99,10 +114,12 @@ impl traits::Device for AgDevice {
         Ok((Some(sign_key), identity))
     }
 
-    fn get_cose_sign_algorithm(&self) -> iana::Algorithm {
-        // In this test implementation of the `device` trait, we use curve P-256 for creating the
-        // signing key pair
-        iana::Algorithm::ES256
+    fn get_cose_sign_algorithm(&self) -> Result<iana::Algorithm, Error> {
+        self.cose_sign_algorithm
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or(ag_err!(InternalError, "cose sign algorithm is missing"))
     }
 
     fn sign_data(&self, _ecdsa: &dyn traits::EcDsa, _data: &[u8]) -> Result<Vec<u8>, Error> {
