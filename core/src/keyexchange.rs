@@ -22,22 +22,23 @@ use crate::{
     key::{
         check_cose_key_params, AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub,
         EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce16, PseudoRandKey,
-        SaltInput, SessionIdInput, AES_256_KEY_LEN,
+        SaltInput, SessionIdInput, AES_256_KEY_LEN, SHA_256_LEN,
     },
     traits::{CryptoTraitImpl, Device, EcDh, Hkdf, Sha256},
     try_to_vec, FallibleAllocExt,
 };
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use authgraph_wire as wire;
+use core::cell::RefCell;
 use core::mem::take;
 use coset::{
     cbor::value::Value, iana, AsCborValue, CborSerializable, CoseKey, CoseSign1, CoseSign1Builder,
     HeaderBuilder, Label,
 };
 use log::info;
-use wire::ErrorCode;
+use wire::{ErrorCode, SESSION_ID_LEN};
 
 pub use wire::{KeInitResult, SessionInfo, SessionInitiationInfo};
 
@@ -49,11 +50,6 @@ pub const CONTEXT_KE_ENCRYPTION_KEY_2: &[u8] = b"KE_ENCRYPTION_KEY_SINK_TO_SOURC
 pub const CONTEXT_KE_HMAC_KEY: &[u8] = b"KE_HMAC_KEY";
 /// Default limit for opened sessions for either source or sink operationss
 pub const MAX_OPENED_SESSIONS: usize = 16;
-
-/// Length of a session identifier in bytes
-pub const SESSION_ID_LEN: usize = 32;
-/// Length of a SHA 256 digest in bytes
-pub const SHA_256_LEN: usize = 32;
 
 /// Enum defining the roles played by the two AuthGraph participants
 #[derive(Clone, Copy)]
@@ -67,7 +63,7 @@ pub enum Role {
 /// Encapsulation of an AuthGraph Source
 pub struct AuthGraphParticipant {
     crypto: CryptoTraitImpl,
-    device: Box<dyn Device>,
+    device: Rc<RefCell<dyn Device>>,
     opened_ke_sessions: OpenedSessions,
     opened_shared_sessions: OpenedSessions,
 }
@@ -116,7 +112,7 @@ impl AuthGraphParticipant {
     /// Creates an instance of AuthGraphParticipant
     pub fn new(
         crypto: CryptoTraitImpl,
-        device: Box<dyn Device>,
+        device: Rc<RefCell<dyn Device>>,
         max_num_sessions: usize,
     ) -> Result<Self, Error> {
         Ok(AuthGraphParticipant {
@@ -133,10 +129,12 @@ impl AuthGraphParticipant {
         let EcExchangeKey { pub_key: pub_key_for_ecdh, priv_key: mut priv_key_for_ecdh } =
             self.crypto.ecdh.generate_key()?;
         // Create a nonce for key agreement
-        let nonce_for_ke = Nonce16::new(&mut *self.crypto.rng);
+        let nonce_for_ke = Nonce16::new(&*self.crypto.rng);
 
-        let pbk =
-            self.device.get_or_create_per_boot_key(&*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
+        let pbk = self
+            .device
+            .borrow()
+            .get_or_create_per_boot_key(&*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
         let mut protected_headers = Vec::<(Label, Value)>::new();
         protected_headers
             .try_push((arc::KE_NONCE, Value::Bytes(nonce_for_ke.0.clone().to_vec())))?;
@@ -150,7 +148,7 @@ impl AuthGraphParticipant {
             &*self.crypto.aes_gcm,
             &mut *self.crypto.rng,
         )?;
-        let (_sign_key, identity) = self.device.get_identity()?;
+        let (_sign_key, identity) = self.device.borrow().get_identity()?;
         let ke_key =
             Key { pub_key: Some(pub_key_for_ecdh.0.to_vec()?), arc_from_pbk: Some(priv_key_arc) };
         let ke_digest = compute_ke_key_digest(&ke_key, &*self.crypto.sha256)?;
@@ -159,7 +157,7 @@ impl AuthGraphParticipant {
             ke_key,
             identity: identity.to_vec()?,
             nonce: nonce_for_ke.0.to_vec(),
-            version: self.device.get_version(),
+            version: self.get_version(),
         })
     }
 
@@ -171,18 +169,18 @@ impl AuthGraphParticipant {
         peer_nonce: &[u8],
         peer_version: i32,
     ) -> Result<KeInitResult, Error> {
-        if self.device.get_negotiated_version(peer_version) > peer_version {
+        if self.device.borrow().get_negotiated_version(peer_version) > peer_version {
             return Err(ag_err!(InternalError, "protocol version is greater than peer's version"));
         }
         let key_for_ecdh = self.crypto.ecdh.generate_key()?;
-        let own_nonce = Nonce16::new(&mut *self.crypto.rng);
+        let own_nonce = Nonce16::new(&*self.crypto.rng);
 
         let (peer_pub_key, peer_identity, peer_nonce) =
             decode_peer_info(peer_key, peer_id, peer_nonce)?;
 
         let ecdh_secret =
             compute_shared_secret(&*self.crypto.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
-        let (sign_key, own_identity) = self.device.get_identity()?;
+        let (sign_key, own_identity) = self.device.borrow().get_identity()?;
 
         let salt_input = SaltInput {
             source_version: peer_version,
@@ -221,7 +219,7 @@ impl AuthGraphParticipant {
                 ke_key: Key { pub_key: Some(key_for_ecdh.pub_key.0.to_vec()?), arc_from_pbk: None },
                 identity: own_identity.to_vec()?,
                 nonce: own_nonce.0.to_vec(),
-                version: self.device.get_negotiated_version(peer_version),
+                version: self.device.borrow().get_negotiated_version(peer_version),
             },
             session_info: SessionInfo {
                 shared_keys,
@@ -245,13 +243,13 @@ impl AuthGraphParticipant {
         self.opened_ke_sessions
             .remove(ke_digest)
             .map_err(|_| ag_err!(InvalidKeKey, "finish is called on invalid session"))?;
-        if self.device.get_version() < peer_version {
+        if self.get_version() < peer_version {
             return Err(ag_err!(
                 IncompatibleProtocolVersion,
                 "peer's protocol version is incompatible"
             ));
         }
-        let pbk = self.device.get_per_boot_key()?;
+        let pbk = self.per_boot_key()?;
         let mut own_ke_key_arc_content = arc::decipher_arc(
             &pbk,
             &own_ke_key
@@ -272,7 +270,7 @@ impl AuthGraphParticipant {
             &peer_pub_key,
         )?;
 
-        let (sign_key, own_identity) = self.device.get_identity()?;
+        let (sign_key, own_identity) = self.device.borrow().get_identity()?;
         let own_ke_pub_key = own_ke_key
             .pub_key
             .ok_or(ag_err!(InvalidPubKeyInKey, "own public key is missing for key agreement"))?;
@@ -282,7 +280,7 @@ impl AuthGraphParticipant {
             })?);
 
         let salt_input = SaltInput {
-            source_version: self.device.get_version(),
+            source_version: self.get_version(),
             sink_ke_pub_key: peer_pub_key,
             source_ke_pub_key: own_ke_pub_key,
             sink_ke_nonce: peer_nonce.clone(),
@@ -304,8 +302,10 @@ impl AuthGraphParticipant {
 
         // Process/verify peer's cert chain and the peer's signature on the session id and retrieve
         // the peer's public signing key
-        let verify_key =
-            self.device.process_peer_cert_chain(&peer_identity.cert_chain, &*self.crypto.ecdsa)?;
+        let verify_key = self
+            .device
+            .borrow()
+            .process_peer_cert_chain(&peer_identity.cert_chain, &*self.crypto.ecdsa)?;
         self.verify_signature_on_session_id(&verify_key, &session_id, peer_sig)?;
 
         // create two arcs encrypting the two shared encrypting keys with the per-boot-key
@@ -318,7 +318,7 @@ impl AuthGraphParticipant {
             arc::AuthenticationCompleted(true),
         )?;
 
-        self.device.record_shared_sessions(
+        self.device.borrow_mut().record_shared_sessions(
             &peer_identity,
             &session_id,
             &shared_keys,
@@ -340,7 +340,7 @@ impl AuthGraphParticipant {
         let in_key_arc = &shared_keys[0];
         let out_key_arc = &shared_keys[1];
 
-        let pbk = self.device.get_per_boot_key()?;
+        let pbk = self.per_boot_key()?;
 
         let in_key_arc_content = arc::decipher_arc(&pbk, in_key_arc, &*self.crypto.aes_gcm)
             .map_err(|e| {
@@ -377,13 +377,14 @@ impl AuthGraphParticipant {
         // Verify peer's cert chain and the peer's signature on the session id
         let verification_key = self
             .device
+            .borrow()
             .process_peer_cert_chain(&in_source_identity.cert_chain, &*self.crypto.ecdsa)?;
         self.verify_signature_on_session_id(&verification_key, &in_session_id, peer_sig)?;
 
         let updated_shared_key_arcs =
             self.auth_complete_shared_key_arcs(in_key_arc_content, out_key_arc_content)?;
 
-        self.device.record_shared_sessions(
+        self.device.borrow_mut().record_shared_sessions(
             &in_source_identity,
             &in_session_id,
             &updated_shared_key_arcs,
@@ -404,8 +405,9 @@ impl AuthGraphParticipant {
         let pbk = match auth_complete.0 {
             false => self
                 .device
+                .borrow()
                 .get_or_create_per_boot_key(&*self.crypto.aes_gcm, &mut *self.crypto.rng)?,
-            true => self.device.get_per_boot_key()?,
+            true => self.per_boot_key()?,
         };
 
         // auth complete protected header
@@ -478,7 +480,7 @@ impl AuthGraphParticipant {
         in_arc_content.protected_headers.try_push(auth_complete_hdr.clone())?;
         out_arc_content.protected_headers.try_push(auth_complete_hdr)?;
 
-        let pbk = self.device.get_per_boot_key()?;
+        let pbk = self.per_boot_key()?;
         let in_encrypt_key_arc =
             arc::create_arc(&pbk, in_arc_content, &*self.crypto.aes_gcm, &mut *self.crypto.rng)?;
         let out_encrypt_key_arc =
@@ -496,12 +498,12 @@ impl AuthGraphParticipant {
 
         // Construct `CoseSign1`
         let protected =
-            HeaderBuilder::new().algorithm(self.device.get_cose_sign_algorithm()).build();
+            HeaderBuilder::new().algorithm(self.device.borrow().get_cose_sign_algorithm()).build();
         let cose_sign1 = CoseSign1Builder::new()
             .protected(protected)
             .try_create_detached_signature(&session_id, &[], |input| match sign_key {
                 Some(key) => self.crypto.ecdsa.sign(&key, input),
-                None => self.device.sign_data(&*self.crypto.ecdsa, input),
+                None => self.device.borrow().sign_data(&*self.crypto.ecdsa, input),
             })?
             .build();
 
@@ -514,9 +516,13 @@ impl AuthGraphParticipant {
         ))
     }
 
+    fn per_boot_key(&self) -> Result<AesKey, Error> {
+        self.device.borrow().get_per_boot_key()
+    }
+
     /// Returns the latest supported version
     pub fn get_version(&self) -> i32 {
-        self.device.get_version()
+        self.device.borrow().get_version()
     }
 
     /// Process and extract signature verification key from the peer identity
@@ -525,7 +531,7 @@ impl AuthGraphParticipant {
         identity: &[u8],
     ) -> Result<EcVerifyKey, Error> {
         let identity = Identity::from_slice(identity)?;
-        self.device.process_peer_cert_chain(&identity.cert_chain, &*self.crypto.ecdsa)
+        self.device.borrow().process_peer_cert_chain(&identity.cert_chain, &*self.crypto.ecdsa)
     }
 
     /// Verify the signature in a CBOR-encoded `COSE_Sign1` with detached payload `session_id`.
@@ -586,15 +592,7 @@ impl AuthGraphParticipant {
         let arc_contents = self.decrypt_and_validate_shared_key_arcs(arcs)?;
         let mut shared_keys = Vec::<AesKey>::new();
         for arc_content in arc_contents {
-            if arc_content.payload.0.len() != AES_256_KEY_LEN {
-                return Err(ag_err!(
-                    InvalidSharedKeyArcs,
-                    "payload key has invalid length: {}",
-                    arc_content.payload.0.len()
-                ));
-            }
-            let mut key = AesKey([0; AES_256_KEY_LEN]);
-            key.0.copy_from_slice(&arc_content.payload.0);
+            let key = AesKey::try_from(arc_content.payload)?;
             if key.0 == [0; AES_256_KEY_LEN] {
                 return Err(ag_err!(InvalidSharedKeyArcs, "payload key is all zero",));
             }
@@ -615,7 +613,7 @@ impl AuthGraphParticipant {
         let mut sink_identity: Option<Identity> = None;
         let mut arc_contents = Vec::<arc::ArcContent>::new();
         for arc in arcs {
-            let pbk = self.device.get_per_boot_key()?;
+            let pbk = self.per_boot_key()?;
             let arc_content = arc::decipher_arc(&pbk, arc, &*self.crypto.aes_gcm).map_err(|e| {
                 ag_err!(InvalidSharedKeyArcs, "failed to decrypt shared key: {e:?}")
             })?;
@@ -657,16 +655,16 @@ impl AuthGraphParticipant {
         let session_identifier = session_identifier.unwrap();
         let source_identity = source_identity.unwrap();
         let sink_identity = sink_identity.unwrap();
-        let (_, self_identity) = self.device.get_identity()?;
+        let (_, self_identity) = self.device.borrow().get_identity()?;
         if self_identity == source_identity {
-            self.device.validate_shared_sessions(
+            self.device.borrow().validate_shared_sessions(
                 &sink_identity,
                 &session_identifier,
                 arcs,
                 &*self.crypto.sha256,
             )?;
         } else if self_identity == sink_identity {
-            self.device.validate_shared_sessions(
+            self.device.borrow().validate_shared_sessions(
                 &source_identity,
                 &session_identifier,
                 arcs,
