@@ -21,31 +21,14 @@ use std::ffi::CString;
 use std::io::{Read, Write};
 
 /// Abstraction of a channel to a secure world TA implementation.
-pub trait SerializedChannel: Send {
+/// Required to be [`Sync`] to support multi-threaded use by the HAL service.
+pub trait SerializedChannel: Send + Sync {
     /// Maximum supported size for the channel in bytes.
     const MAX_SIZE: usize;
 
     /// Accepts serialized request messages and returns serialized response messages
     /// (or an error if communication via the channel is lost).
-    fn execute(&mut self, serialized_req: &[u8]) -> binder::Result<Vec<u8>>;
-}
-
-/// Message-oriented wrapper around a pair of stream-oriented channels.  This allows a pair of
-/// uni-directional channels that don't necessarily preserve message boundaries to appear as a
-/// single bi-directional channel that does preserve message boundaries.
-#[derive(Debug)]
-pub struct MessageChannel<R: Read, W: Write> {
-    r: R,
-    w: W,
-}
-
-impl<R: Read + Send, W: Write + Send> SerializedChannel for MessageChannel<R, W> {
-    const MAX_SIZE: usize = 4096;
-
-    fn execute(&mut self, serialized_req: &[u8]) -> binder::Result<Vec<u8>> {
-        write_msg(&mut self.w, serialized_req)?;
-        read_msg(&mut self.r)
-    }
+    fn execute(&self, serialized_req: &[u8]) -> binder::Result<Vec<u8>>;
 }
 
 /// Write a message to a stream-oriented [`Write`] item, with length framing.

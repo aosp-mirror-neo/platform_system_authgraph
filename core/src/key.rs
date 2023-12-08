@@ -15,10 +15,11 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Definitions related to different types of keys and other cryptographic artifacts.
-use crate::ag_verr;
+use crate::arc;
 use crate::error::Error;
 use crate::traits::Rng;
 use crate::FallibleAllocExt;
+use crate::{ag_err, ag_verr};
 use alloc::vec::Vec;
 use authgraph_wire as wire;
 use coset::{
@@ -32,9 +33,28 @@ pub use wire::Key;
 /// Length of an AES 256-bits key in bytes
 pub const AES_256_KEY_LEN: usize = 32;
 
+/// Length of a SHA 256 digest in bytes
+pub const SHA_256_LEN: usize = 32;
+
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
-pub struct AesKey(pub [u8; 32]);
+pub struct AesKey(pub [u8; AES_256_KEY_LEN]);
+
+impl TryFrom<arc::ArcPayload> for AesKey {
+    type Error = Error;
+    fn try_from(payload: arc::ArcPayload) -> Result<AesKey, Self::Error> {
+        if payload.0.len() != AES_256_KEY_LEN {
+            return Err(ag_err!(
+                InvalidSharedKeyArcs,
+                "payload key has invalid length: {}",
+                payload.0.len()
+            ));
+        }
+        let mut key = AesKey([0; AES_256_KEY_LEN]);
+        key.0.copy_from_slice(&payload.0);
+        Ok(key)
+    }
+}
 
 /// Size (in bytes) of a curve 25519 private key.
 pub const CURVE25519_PRIV_KEY_LEN: usize = 32;
@@ -79,7 +99,7 @@ pub struct Nonce16(pub [u8; 16]);
 
 impl Nonce16 {
     /// Create a random nonce of 16 bytes
-    pub fn new(rng: &mut dyn Rng) -> Self {
+    pub fn new(rng: &dyn Rng) -> Self {
         let mut nonce = Nonce16([0u8; 16]);
         rng.fill_bytes(&mut nonce.0);
         nonce
@@ -91,10 +111,22 @@ pub struct Nonce12(pub [u8; 12]);
 
 impl Nonce12 {
     /// Create a random nonce of 12 bytes
-    pub fn new(rng: &mut dyn Rng) -> Self {
+    pub fn new(rng: &dyn Rng) -> Self {
         let mut nonce = Nonce12([0u8; 12]);
         rng.fill_bytes(&mut nonce.0);
         nonce
+    }
+}
+
+impl TryFrom<&[u8]> for Nonce12 {
+    type Error = Error;
+    fn try_from(v: &[u8]) -> Result<Self, Self::Error> {
+        if v.len() != 12 {
+            return Err(ag_err!(InvalidSharedKeyArcs, "nonce has invalid length: {}", v.len()));
+        }
+        let mut nonce = Nonce12([0; 12]);
+        nonce.0.copy_from_slice(v);
+        Ok(nonce)
     }
 }
 

@@ -30,6 +30,7 @@ use openssl::symm::{Cipher, Crypter, Mode};
 const TAG_LEN: usize = 16;
 
 /// BoringSSL-based implementation of the [`AesGcm`] trait.
+#[derive(Clone)]
 pub struct BoringAes;
 
 impl AesGcm for BoringAes {
@@ -79,5 +80,8 @@ impl AesGcm for BoringAes {
         pt.truncate(count);
 
         Ok(pt)
+    }
+    fn box_clone(&self) -> Box<dyn AesGcm> {
+        Box::new(self.clone())
     }
 }

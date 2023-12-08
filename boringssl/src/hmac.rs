@@ -17,7 +17,7 @@
 //! BoringSSL-based implementation for the AuthGraph HMAC-related traits.
 use authgraph_core::{
     error::Error,
-    key::{EcdhSecret, HmacKey, PseudoRandKey},
+    key::{EcdhSecret, HmacKey, PseudoRandKey, SHA_256_LEN},
     traits::{Hkdf, Hmac, Sha256},
     vec_try,
 };
@@ -59,7 +59,7 @@ impl Hkdf for BoringHkdf {
 pub struct BoringSha256;
 
 impl Sha256 for BoringSha256 {
-    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; 32], Error> {
+    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; SHA_256_LEN], Error> {
         let mut sha256 = openssl::sha::Sha256::new();
         sha256.update(data);
         Ok(sha256.finish())
