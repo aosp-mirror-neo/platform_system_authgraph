@@ -16,8 +16,10 @@
 
 //! Tests for BoringSSL-based implementations of AuthGraph traits.
 
+use alloc::rc::Rc;
 use authgraph_core::keyexchange;
 use authgraph_core_test as ag_test;
+use core::cell::RefCell;
 
 #[test]
 fn test_rng() {
@@ -84,14 +86,14 @@ fn test_p384_round_trip() {
 fn test_key_exchange_protocol() {
     let mut source = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::<crate::test_device::AgDevice>::default(),
+        Rc::new(RefCell::new(crate::test_device::AgDevice::default())),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
     ag_test::test_key_exchange_create(&mut source);
     let mut sink = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::<crate::test_device::AgDevice>::default(),
+        Rc::new(RefCell::new(crate::test_device::AgDevice::default())),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
@@ -110,14 +112,14 @@ fn test_ke_with_newer_source() {
 
     let mut source = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(source_device),
+        Rc::new(RefCell::new(source_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
 
     let mut sink = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(sink_device),
+        Rc::new(RefCell::new(sink_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
@@ -135,14 +137,14 @@ fn test_ke_with_newer_sink() {
 
     let mut source = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(source_device),
+        Rc::new(RefCell::new(source_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
 
     let mut sink = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(sink_device),
+        Rc::new(RefCell::new(sink_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
@@ -160,14 +162,14 @@ fn test_ke_for_protocol_downgrade() {
 
     let mut source = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(source_device),
+        Rc::new(RefCell::new(source_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
 
     let mut sink = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::new(sink_device),
+        Rc::new(RefCell::new(sink_device)),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
@@ -179,13 +181,13 @@ fn test_ke_for_protocol_downgrade() {
 fn test_ke_for_replay() {
     let mut source = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::<crate::test_device::AgDevice>::default(),
+        Rc::new(RefCell::new(crate::test_device::AgDevice::default())),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
     let mut sink = keyexchange::AuthGraphParticipant::new(
         crate::crypto_trait_impls(),
-        Box::<crate::test_device::AgDevice>::default(),
+        Rc::new(RefCell::new(crate::test_device::AgDevice::default())),
         keyexchange::MAX_OPENED_SESSIONS,
     )
     .unwrap();
