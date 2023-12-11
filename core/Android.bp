@@ -30,6 +30,26 @@ rust_library {
     ],
 }
 
+rust_library_rlib {
+    name: "libauthgraph_core_nostd",
+    crate_name: "authgraph_core",
+    srcs: ["src/lib.rs"],
+    vendor_available: true,
+    prefer_rlib: true,
+    no_stdlibs: true,
+    rustlibs: [
+        "libauthgraph_wire_nostd",
+        "libcoset_nostd",
+        "liblog_rust_nostd",
+        "libzeroize_nostd",
+    ],
+    stdlibs: [
+        "liballoc.rust_sysroot",
+        "libcompiler_builtins.rust_sysroot",
+        "libcore.rust_sysroot",
+    ],
+}
+
 rust_test {
     name: "libauthgraph_core_unit_test",
     crate_name: "authgraph_core_unit_test",
