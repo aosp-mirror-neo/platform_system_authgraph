@@ -18,11 +18,14 @@
 use authgraph_core::traits::Rng;
 
 /// [`Rng`] implementation based on BoringSSL.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BoringRng;
 
 impl Rng for BoringRng {
-    fn fill_bytes(&mut self, nonce: &mut [u8]) {
+    fn fill_bytes(&self, nonce: &mut [u8]) {
         openssl::rand::rand_bytes(nonce).unwrap(); // safe: BoringSSL's RAND_bytes() never fails
+    }
+    fn box_clone(&self) -> Box<dyn Rng> {
+        Box::new(self.clone())
     }
 }

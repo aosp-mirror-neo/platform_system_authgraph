@@ -14,8 +14,7 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-//! Crate that supports conversions between AuthGraph core library types and AuthGraph HAL
-//! AIDL-generated types
+//! Crate that holds common code for an AuthGraph HAL service.
 
 use android_hardware_security_authgraph::aidl::android::hardware::security::authgraph::{
     Arc::Arc, Identity::Identity, KeInitResult::KeInitResult, Key::Key, PlainPubKey::PlainPubKey,

@@ -20,11 +20,11 @@ use crate::error::Error;
 use crate::key::{
     AesKey, CertChain, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
     EcdhSecret, HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
-    PseudoRandKey,
+    PseudoRandKey, AES_256_KEY_LEN, SHA_256_LEN,
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use authgraph_wire::ErrorCode;
+use authgraph_wire::{ErrorCode, SESSION_ID_LEN};
 use coset::iana::Algorithm;
 
 /// The first version of the AuthGraph key exchange protocol
@@ -52,7 +52,7 @@ pub struct CryptoTraitImpl {
 pub trait AesGcm: Send {
     /// Generate a key
     fn generate_key(&self, rng: &mut dyn Rng) -> Result<AesKey, Error> {
-        let mut key = AesKey([0; 32]);
+        let mut key = AesKey([0; AES_256_KEY_LEN]);
         rng.fill_bytes(&mut key.0);
         Ok(key)
     }
@@ -72,6 +72,8 @@ pub trait AesGcm: Send {
         aad: &[u8],
         nonce: &Nonce12,
     ) -> Result<Vec<u8>, Error>;
+    /// Emit a copy of the trait implementation, as a boxed trait object.
+    fn box_clone(&self) -> Box<dyn AesGcm>;
 }
 
 /// Trait methods for ECDH key exchange with P256 curve
@@ -122,17 +124,19 @@ pub trait Hkdf: Send {
 /// Trait method for computing cryptographic hash function on an input that outputs 256-bit hash.
 pub trait Sha256: Send {
     /// Compute SHA256 over an input
-    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; 32], Error>;
+    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; SHA_256_LEN], Error>;
 }
 
 /// Trait methods for generating cryptographically secure random numbers
-pub trait Rng: Send {
+pub trait Rng {
     /// Create a cryptographically secure random bytes
-    fn fill_bytes(&mut self, nonce: &mut [u8]);
+    fn fill_bytes(&self, nonce: &mut [u8]);
+    /// Emit a copy of the trait implementation, as a boxed trait object.
+    fn box_clone(&self) -> Box<dyn Rng>;
 }
 
 /// Trait methods for retrieving device specific information and for device specific functionality
-pub trait Device: Send {
+pub trait Device {
     /// Retrieve (or create) the ephemeral (with per-boot life time) 256-bits encryption key to be
     /// used with AES-GCM
     fn get_or_create_per_boot_key(
@@ -201,7 +205,7 @@ pub trait Device: Send {
     fn record_shared_sessions(
         &mut self,
         peer_identity: &Identity,
-        session_id: &[u8; 32],
+        session_id: &[u8; SESSION_ID_LEN],
         shared_keys: &[Vec<u8>; 2],
         sha256: &dyn Sha256,
     ) -> Result<(), Error>;
@@ -211,7 +215,7 @@ pub trait Device: Send {
     fn validate_shared_sessions(
         &self,
         peer_identity: &Identity,
-        session_id: &[u8; 32],
+        session_id: &[u8; SESSION_ID_LEN],
         shared_keys: &[Vec<u8>],
         sha256: &dyn Sha256,
     ) -> Result<(), Error>;
