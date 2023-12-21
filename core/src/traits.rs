@@ -15,16 +15,15 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Traits representing crypto abstractions and device specific functionality.
-use crate::ag_err;
 use crate::error::Error;
 use crate::key::{
-    AesKey, CertChain, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
-    EcdhSecret, HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
+    AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey, EcdhSecret,
+    HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
     PseudoRandKey, AES_256_KEY_LEN, SHA_256_LEN,
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use authgraph_wire::{ErrorCode, SESSION_ID_LEN};
+use authgraph_wire::SESSION_ID_LEN;
 use coset::iana::Algorithm;
 
 /// The first version of the AuthGraph key exchange protocol
@@ -150,27 +149,24 @@ pub trait Device {
     /// Retrieve the identity of the AuthGraph participant, along with the signing key
     fn get_identity(&self) -> Result<(Option<EcSignKey>, Identity), Error>;
     /// Retrieve the Cose signing algorithm corresponding to the signing key pair of the party.
-    fn get_cose_sign_algorithm(&self) -> Algorithm;
+    fn get_cose_sign_algorithm(&self) -> Result<Algorithm, Error>;
     /// Compute signature over the given data. This is an alternative to the `sign` method in the
     /// `EcDsa` trait, when the private signing key is not readily available (i.e. `get_identity` in
     /// the `Device` trait returns `None` for the first element of the returned tuple). If the
     /// private signing key is returned from `get_identity` method, you can mark this as
     /// unimplemented and instead implement `sign` method in the `EcDsa` trait.
     fn sign_data(&self, ecdsa: &dyn EcDsa, data: &[u8]) -> Result<Vec<u8>, Error>;
-    /// Process the peer's DICE certificate chain if it is part of the `CertChain`, i.e. verify
-    /// the chain of signatures and any other required information in the certificate chain and
-    /// return the signature verification key.
-    /// In the default implementation, we assume that the `dice_cert_chain` is None and return the
-    /// root key as the signature verification key.
-    fn process_peer_cert_chain(
+    /// Validate the peer's identity (e.g. if `cert_chain` is present, validate the chain of
+    /// signatures and any other required information in the certificate chain) and return the
+    /// signature verification key.
+    /// The default implementation calls the helper functions that perform the minimum required
+    /// validation and extraction of the signature verification key.
+    fn validate_peer_identity(
         &self,
-        cert_chain: &CertChain,
-        _ec: &dyn EcDsa,
+        identity: &Identity,
+        ecdsa: &dyn EcDsa,
     ) -> Result<EcVerifyKey, Error> {
-        match cert_chain.dice_cert_chain {
-            None => Ok(cert_chain.root_key.clone()),
-            Some(_) => Err(ag_err!(Unimplemented, "No code for checking DICE chain!")),
-        }
+        identity.validate(ecdsa)
     }
     /// Obtain the identity verification decision, by evaluating the latest identity against the
     /// previous identity.
