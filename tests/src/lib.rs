@@ -1,13 +1,21 @@
 //! Test methods to confirm basic functionality of trait implementations.
 
-use authgraph_core::error::Error;
+extern crate alloc;
 use authgraph_core::key::{
-    AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Key, Nonce12, PseudoRandKey,
+    AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce12, PseudoRandKey,
+    CURVE25519_PRIV_KEY_LEN, EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION, IDENTITY_VERSION,
 };
 use authgraph_core::keyexchange;
 use authgraph_core::traits::{AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256};
+use authgraph_core::{ag_err, error::Error};
 use authgraph_wire::ErrorCode;
-use coset::{cbor::Value, iana, CoseKeyBuilder};
+use coset::{
+    cbor::Value,
+    iana::{self, EnumI64},
+    Algorithm, CborSerializable, CoseKey, CoseKeyBuilder, CoseSign1Builder, HeaderBuilder,
+    KeyOperation, KeyType, Label,
+};
+use std::ffi::CString;
 
 /// Test basic [`Rng`] functionality.
 pub fn test_rng<R: Rng>(rng: &mut R) {
@@ -810,4 +818,407 @@ pub fn test_ke_for_replay(
         Err(e) if e.0 == ErrorCode::InvalidSharedKeyArcs => {}
         Err(e) => panic!("got error {e:?}, wanted ErrorCode::InvalidSharedKeyArcs"),
     }
+}
+
+/// Test the logic of decoding and validating `Identity` using the test data created with open-dice.
+pub fn validate_identity<E: EcDsa>(ecdsa: &E) {
+    for cert_chain_len in 0..6 {
+        let (pvt_sign_key, identity) =
+            create_identity(cert_chain_len).expect("error in creating identity");
+        // decode identity
+        let decoded_identity =
+            Identity::from_slice(&identity).expect("error in decoding the identity");
+        // validate identity
+        let verify_key =
+            decoded_identity.validate(ecdsa).expect("error in validating the identity");
+        // re-encode the decoded identity
+        decoded_identity.to_vec().expect("failed to serialize Identity");
+
+        // sign using the private signing key derived from the leaf CDI attest
+        let data = b"test string to sign";
+
+        let protected =
+            HeaderBuilder::new().algorithm(verify_key.get_cose_sign_algorithm()).build();
+        let cose_sign1 = CoseSign1Builder::new()
+            .protected(protected)
+            .payload(data.to_vec())
+            .try_create_signature(&[], |input| ecdsa.sign(&pvt_sign_key, input))
+            .expect("error creating the signature")
+            .build();
+        // verify the signature with the public signing key extracted from the leaf certificate in
+        // the DICE chain
+        cose_sign1
+            .verify_signature(&[], |signature, data| {
+                ecdsa.verify_signature(&verify_key, data, signature)
+            })
+            .expect("error in verifying the signature");
+    }
+}
+
+/// Construct a CBOR serialized `Identity` with a `CertChain` containing the given number of
+/// certificate entries, using open-dice. The maximum length supported by this method is 5.
+/// Return the private signing key corresponding to the public signing key.
+pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Error> {
+    const UDS: [u8; diced_open_dice::CDI_SIZE] = [
+        0x1d, 0xa5, 0xea, 0x90, 0x47, 0xfc, 0xb5, 0xf6, 0x47, 0x12, 0xd3, 0x65, 0x9c, 0xf2, 0x00,
+        0xe0, 0x06, 0xf7, 0xe8, 0x9e, 0x2f, 0xd0, 0x94, 0x7f, 0xc9, 0x9a, 0x9d, 0x40, 0xf7, 0xce,
+        0x13, 0x21,
+    ];
+    let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
+    let (root_pub_key, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        .expect("failed to create key pair from seed.");
+    let root_pub_cose_key = CoseKey {
+        kty: KeyType::Assigned(iana::KeyType::OKP),
+        alg: Some(Algorithm::Assigned(iana::Algorithm::EdDSA)),
+        key_ops: vec![KeyOperation::Assigned(iana::KeyOperation::Verify)].into_iter().collect(),
+        params: vec![
+            (
+                Label::Int(iana::Ec2KeyParameter::Crv.to_i64()),
+                iana::EllipticCurve::Ed25519.to_i64().into(),
+            ),
+            (Label::Int(iana::Ec2KeyParameter::X.to_i64()), Value::Bytes(root_pub_key.to_vec())),
+        ],
+        ..Default::default()
+    };
+    let root_pub_cose_key_bstr =
+        root_pub_cose_key.to_vec().expect("failed to serialize root pub key");
+
+    if dice_chain_len == 0 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+
+    const CODE_HASH_PVMFW: [u8; diced_open_dice::HASH_SIZE] = [
+        0x16, 0x48, 0xf2, 0x55, 0x53, 0x23, 0xdd, 0x15, 0x2e, 0x83, 0x38, 0xc3, 0x64, 0x38, 0x63,
+        0x26, 0x0f, 0xcf, 0x5b, 0xd1, 0x3a, 0xd3, 0x40, 0x3e, 0x23, 0xf8, 0x34, 0x4c, 0x6d, 0xa2,
+        0xbe, 0x25, 0x1c, 0xb0, 0x29, 0xe8, 0xc3, 0xfb, 0xb8, 0x80, 0xdc, 0xb1, 0xd2, 0xb3, 0x91,
+        0x4d, 0xd3, 0xfb, 0x01, 0x0f, 0xe4, 0xe9, 0x46, 0xa2, 0xc0, 0x26, 0x57, 0x5a, 0xba, 0x30,
+        0xf7, 0x15, 0x98, 0x14,
+    ];
+    const AUTHORITY_HASH_PVMFW: [u8; diced_open_dice::HASH_SIZE] = [
+        0xf9, 0x00, 0x9d, 0xc2, 0x59, 0x09, 0xe0, 0xb6, 0x98, 0xbd, 0xe3, 0x97, 0x4a, 0xcb, 0x3c,
+        0xe7, 0x6b, 0x24, 0xc3, 0xe4, 0x98, 0xdd, 0xa9, 0x6a, 0x41, 0x59, 0x15, 0xb1, 0x23, 0xe6,
+        0xc8, 0xdf, 0xfb, 0x52, 0xb4, 0x52, 0xc1, 0xb9, 0x61, 0xdd, 0xbc, 0x5b, 0x37, 0x0e, 0x12,
+        0x12, 0xb2, 0xfd, 0xc1, 0x09, 0xb0, 0xcf, 0x33, 0x81, 0x4c, 0xc6, 0x29, 0x1b, 0x99, 0xea,
+        0xae, 0xfd, 0xaa, 0x0d,
+    ];
+    const HIDDEN_PVMFW: [u8; diced_open_dice::HIDDEN_SIZE] = [
+        0xa2, 0x01, 0xd0, 0xc0, 0xaa, 0x75, 0x3c, 0x06, 0x43, 0x98, 0x6c, 0xc3, 0x5a, 0xb5, 0x5f,
+        0x1f, 0x0f, 0x92, 0x44, 0x3b, 0x0e, 0xd4, 0x29, 0x75, 0xe3, 0xdb, 0x36, 0xda, 0xc8, 0x07,
+        0x97, 0x4d, 0xff, 0xbc, 0x6a, 0xa4, 0x8a, 0xef, 0xc4, 0x7f, 0xf8, 0x61, 0x7d, 0x51, 0x4d,
+        0x2f, 0xdf, 0x7e, 0x8c, 0x3d, 0xa3, 0xfc, 0x63, 0xd4, 0xd4, 0x74, 0x8a, 0xc4, 0x14, 0x45,
+        0x83, 0x6b, 0x12, 0x7e,
+    ];
+    let comp_name_1 = CString::new("Protected VM firmware").expect("CString::new failed");
+    let config_values_1 = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name_1),
+        component_version: Some(1),
+        resettable: true,
+        ..Default::default()
+    };
+    let config_descriptor_1 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_1)
+        .expect("failed to format config descriptor");
+    let input_values_1 = diced_open_dice::InputValues::new(
+        CODE_HASH_PVMFW,
+        diced_open_dice::Config::Descriptor(config_descriptor_1.as_slice()),
+        AUTHORITY_HASH_PVMFW,
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        HIDDEN_PVMFW,
+    );
+    let (cdi_values_1, cert_1) = diced_open_dice::retry_dice_main_flow(&UDS, &UDS, &input_values_1)
+        .expect("Failed to run first main flow");
+
+    if dice_chain_len == 1 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+            Value::from_slice(&cert_1).expect("failed to deserialize the certificate into CBOR"),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key_seed =
+            diced_open_dice::derive_cdi_private_key_seed(&cdi_values_1.cdi_attest).unwrap();
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+
+    const CODE_HASH_SERVICE_VM: [u8; diced_open_dice::HASH_SIZE] = [
+        0xa4, 0x0c, 0xcb, 0xc1, 0xbf, 0xfa, 0xcc, 0xfd, 0xeb, 0xf4, 0xfc, 0x43, 0x83, 0x7f, 0x46,
+        0x8d, 0xd8, 0xd8, 0x14, 0xc1, 0x96, 0x14, 0x1f, 0x6e, 0xb3, 0xa0, 0xd9, 0x56, 0xb3, 0xbf,
+        0x2f, 0xfa, 0x88, 0x70, 0x11, 0x07, 0x39, 0xa4, 0xd2, 0xa9, 0x6b, 0x18, 0x28, 0xe8, 0x29,
+        0x20, 0x49, 0x0f, 0xbb, 0x8d, 0x08, 0x8c, 0xc6, 0x54, 0xe9, 0x71, 0xd2, 0x7e, 0xa4, 0xfe,
+        0x58, 0x7f, 0xd3, 0xc7,
+    ];
+    const AUTHORITY_HASH_SERVICE_VM: [u8; diced_open_dice::HASH_SIZE] = [
+        0xb2, 0x69, 0x05, 0x48, 0x56, 0xb5, 0xfa, 0x55, 0x6f, 0xac, 0x56, 0xd9, 0x02, 0x35, 0x2b,
+        0xaa, 0x4c, 0xba, 0x28, 0xdd, 0x82, 0x3a, 0x86, 0xf5, 0xd4, 0xc2, 0xf1, 0xf9, 0x35, 0x7d,
+        0xe4, 0x43, 0x13, 0xbf, 0xfe, 0xd3, 0x36, 0xd8, 0x1c, 0x12, 0x78, 0x5c, 0x9c, 0x3e, 0xf6,
+        0x66, 0xef, 0xab, 0x3d, 0x0f, 0x89, 0xa4, 0x6f, 0xc9, 0x72, 0xee, 0x73, 0x43, 0x02, 0x8a,
+        0xef, 0xbc, 0x05, 0x98,
+    ];
+    const HIDDEN_SERVICE_VM: [u8; diced_open_dice::HIDDEN_SIZE] = [
+        0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95, 0x59, 0x40, 0x5e, 0x64, 0xe5, 0x64, 0x3f, 0xfd, 0x21,
+        0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a, 0xe2, 0x97, 0xdd, 0xe2, 0x4f, 0xb0, 0x7d, 0x7e,
+        0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x54, 0x41, 0x3f, 0x8f, 0x78, 0x64, 0x1a, 0x51, 0x27,
+        0x9d, 0x55, 0x8a, 0xe9, 0x90, 0x35, 0xab, 0x39, 0x80, 0x4b, 0x94, 0x40, 0x84, 0xa2, 0xfd,
+        0x73, 0xeb, 0x35, 0x7a,
+    ];
+
+    let comp_name_2 = CString::new("VM entry").expect("CString::new failed");
+    let config_values_2 = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name_2),
+        component_version: Some(12),
+        resettable: true,
+        ..Default::default()
+    };
+    let config_descriptor_2 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_2)
+        .expect("failed to format config descriptor");
+
+    let input_values_2 = diced_open_dice::InputValues::new(
+        CODE_HASH_SERVICE_VM,
+        diced_open_dice::Config::Descriptor(config_descriptor_2.as_slice()),
+        AUTHORITY_HASH_SERVICE_VM,
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        HIDDEN_SERVICE_VM,
+    );
+
+    let (cdi_values_2, cert_2) = diced_open_dice::retry_dice_main_flow(
+        &cdi_values_1.cdi_attest,
+        &cdi_values_1.cdi_seal,
+        &input_values_2,
+    )
+    .expect("Failed to run first main flow");
+
+    if dice_chain_len == 2 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+            Value::from_slice(&cert_1).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_2).expect("failed to deserialize the certificate into CBOR"),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key_seed =
+            diced_open_dice::derive_cdi_private_key_seed(&cdi_values_2.cdi_attest).unwrap();
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+
+    const CODE_HASH_PAYLOAD: [u8; diced_open_dice::HASH_SIZE] = [
+        0x08, 0x78, 0xc2, 0x5b, 0xe7, 0xea, 0x3d, 0x62, 0x70, 0x22, 0xd9, 0x1c, 0x4f, 0x3c, 0x2e,
+        0x2f, 0x0f, 0x97, 0xa4, 0x6f, 0x6d, 0xd5, 0xe6, 0x4a, 0x6d, 0xbe, 0x34, 0x2e, 0x56, 0x04,
+        0xaf, 0xef, 0x74, 0x3f, 0xec, 0xb8, 0x44, 0x11, 0xf4, 0x2f, 0x05, 0xb2, 0x06, 0xa3, 0x0e,
+        0x75, 0xb7, 0x40, 0x9a, 0x4c, 0x58, 0xab, 0x96, 0xe7, 0x07, 0x97, 0x07, 0x86, 0x5c, 0xa1,
+        0x42, 0x12, 0xf0, 0x34,
+    ];
+    const AUTHORITY_HASH_PAYLOAD: [u8; diced_open_dice::HASH_SIZE] = [
+        0xc7, 0x97, 0x5b, 0xa9, 0x9e, 0xbf, 0x0b, 0xeb, 0xe7, 0x7f, 0x69, 0x8f, 0x8e, 0xcf, 0x04,
+        0x7d, 0x2c, 0x0f, 0x4d, 0xbe, 0xcb, 0xf5, 0xf1, 0x4c, 0x1d, 0x1c, 0xb7, 0x44, 0xdf, 0xf8,
+        0x40, 0x90, 0x09, 0x65, 0xab, 0x01, 0x34, 0x3e, 0xc2, 0xc4, 0xf7, 0xa2, 0x3a, 0x5c, 0x4e,
+        0x76, 0x4f, 0x42, 0xa8, 0x6c, 0xc9, 0xf1, 0x7b, 0x12, 0x80, 0xa4, 0xef, 0xa2, 0x4d, 0x72,
+        0xa1, 0x21, 0xe2, 0x47,
+    ];
+
+    let comp_name_3 = CString::new("Payload").expect("CString::new failed");
+    let config_values_3 = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name_3),
+        component_version: Some(12),
+        resettable: true,
+        ..Default::default()
+    };
+    let config_descriptor_3 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_3)
+        .expect("failed to format config descriptor");
+
+    let input_values_3 = diced_open_dice::InputValues::new(
+        CODE_HASH_PAYLOAD,
+        diced_open_dice::Config::Descriptor(config_descriptor_3.as_slice()),
+        AUTHORITY_HASH_PAYLOAD,
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        [0u8; diced_open_dice::HIDDEN_SIZE],
+    );
+
+    let (cdi_values_3, cert_3) = diced_open_dice::retry_dice_main_flow(
+        &cdi_values_2.cdi_attest,
+        &cdi_values_2.cdi_seal,
+        &input_values_3,
+    )
+    .expect("Failed to run first main flow");
+
+    if dice_chain_len == 3 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+            Value::from_slice(&cert_1).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_2).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_3).expect("failed to deserialize the certificate into CBOR"),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key_seed =
+            diced_open_dice::derive_cdi_private_key_seed(&cdi_values_3.cdi_attest).unwrap();
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+
+    const CODE_HASH_APK1: [u8; diced_open_dice::HASH_SIZE] = [
+        0x41, 0x92, 0x0d, 0xd0, 0xf5, 0x60, 0xe3, 0x69, 0x26, 0x7f, 0xb8, 0xbc, 0x12, 0x3a, 0xd1,
+        0x95, 0x1d, 0xb8, 0x9a, 0x9c, 0x3a, 0x3f, 0x01, 0xbf, 0xa8, 0xd9, 0x6d, 0xe9, 0x90, 0x30,
+        0x1d, 0x0b, 0xaf, 0xef, 0x74, 0x3f, 0xec, 0xb8, 0x44, 0x11, 0xf4, 0x2f, 0x05, 0xb2, 0x06,
+        0xa3, 0x0e, 0x75, 0xb7, 0x40, 0x9a, 0x4c, 0x58, 0xab, 0x96, 0xe7, 0x07, 0x97, 0x07, 0x86,
+        0x5c, 0xa1, 0x42, 0x12,
+    ];
+    const AUTHORITY_HASH_APK1: [u8; diced_open_dice::HASH_SIZE] = [
+        0xe3, 0xd9, 0x1c, 0xf5, 0x6f, 0xee, 0x73, 0x40, 0x3d, 0x95, 0x59, 0x67, 0xea, 0x5d, 0x01,
+        0xfd, 0x25, 0x9d, 0x5c, 0x88, 0x94, 0x3a, 0xc6, 0xd7, 0xa9, 0xdc, 0x4c, 0x60, 0x81, 0xbe,
+        0x2b, 0x74, 0x40, 0x90, 0x09, 0x65, 0xab, 0x01, 0x34, 0x3e, 0xc2, 0xc4, 0xf7, 0xa2, 0x3a,
+        0x5c, 0x4e, 0x76, 0x4f, 0x42, 0xa8, 0x6c, 0xc9, 0xf1, 0x7b, 0x12, 0x80, 0xa4, 0xef, 0xa2,
+        0x4d, 0x72, 0xa1, 0x21,
+    ];
+
+    let comp_name_4 = CString::new("APK1").expect("CString::new failed");
+    let config_values_4 = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name_4),
+        component_version: Some(12),
+        resettable: true,
+        ..Default::default()
+    };
+    let config_descriptor_4 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_4)
+        .expect("failed to format config descriptor");
+
+    let input_values_4 = diced_open_dice::InputValues::new(
+        CODE_HASH_APK1,
+        diced_open_dice::Config::Descriptor(config_descriptor_4.as_slice()),
+        AUTHORITY_HASH_APK1,
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        [0u8; diced_open_dice::HIDDEN_SIZE],
+    );
+
+    let (cdi_values_4, cert_4) = diced_open_dice::retry_dice_main_flow(
+        &cdi_values_3.cdi_attest,
+        &cdi_values_3.cdi_seal,
+        &input_values_4,
+    )
+    .expect("Failed to run first main flow");
+
+    if dice_chain_len == 4 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+            Value::from_slice(&cert_1).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_2).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_3).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_4).expect("failed to deserialize the certificate into CBOR"),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key_seed =
+            diced_open_dice::derive_cdi_private_key_seed(&cdi_values_4.cdi_attest).unwrap();
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+
+    const CODE_HASH_APEX1: [u8; diced_open_dice::HASH_SIZE] = [
+        0x52, 0x93, 0x2b, 0xb0, 0x8d, 0xec, 0xdf, 0x54, 0x1f, 0x5c, 0x10, 0x9d, 0x17, 0xce, 0x7f,
+        0xac, 0xb0, 0x2b, 0xe2, 0x99, 0x05, 0x7d, 0xa3, 0x9b, 0xa6, 0x3e, 0xf9, 0x99, 0xa2, 0xea,
+        0xd4, 0xd9, 0x1d, 0x0b, 0xaf, 0xef, 0x74, 0x3f, 0xec, 0xb8, 0x44, 0x11, 0xf4, 0x2f, 0x05,
+        0xb2, 0x06, 0xa3, 0x0e, 0x75, 0xb7, 0x40, 0x9a, 0x4c, 0x58, 0xab, 0x96, 0xe7, 0x07, 0x97,
+        0x07, 0x86, 0x5c, 0xa1,
+    ];
+    const AUTHORITY_HASH_APEX1: [u8; diced_open_dice::HASH_SIZE] = [
+        0xd1, 0xfc, 0x3d, 0x5f, 0xa0, 0x5f, 0x02, 0xd0, 0x83, 0x9b, 0x0e, 0x32, 0xc2, 0x27, 0x09,
+        0x12, 0xcc, 0xfc, 0x42, 0xf6, 0x0d, 0xf4, 0x7d, 0xc8, 0x80, 0x1a, 0x64, 0x25, 0xa7, 0xfa,
+        0x4a, 0x37, 0x2b, 0x74, 0x40, 0x90, 0x09, 0x65, 0xab, 0x01, 0x34, 0x3e, 0xc2, 0xc4, 0xf7,
+        0xa2, 0x3a, 0x5c, 0x4e, 0x76, 0x4f, 0x42, 0xa8, 0x6c, 0xc9, 0xf1, 0x7b, 0x12, 0x80, 0xa4,
+        0xef, 0xa2, 0x4d, 0x72,
+    ];
+
+    let comp_name_5 = CString::new("APEX1").expect("CString::new failed");
+    let config_values_5 = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name_5),
+        component_version: Some(12),
+        resettable: true,
+        ..Default::default()
+    };
+    let config_descriptor_5 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_5)
+        .expect("failed to format config descriptor");
+
+    let input_values_5 = diced_open_dice::InputValues::new(
+        CODE_HASH_APEX1,
+        diced_open_dice::Config::Descriptor(config_descriptor_5.as_slice()),
+        AUTHORITY_HASH_APEX1,
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        [0u8; diced_open_dice::HIDDEN_SIZE],
+    );
+
+    let (cdi_values_5, cert_5) = diced_open_dice::retry_dice_main_flow(
+        &cdi_values_4.cdi_attest,
+        &cdi_values_4.cdi_seal,
+        &input_values_5,
+    )
+    .expect("Failed to run first main flow");
+
+    if dice_chain_len == 5 {
+        let cert_chain = Value::Array(vec![
+            Value::Integer(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION.into()),
+            Value::Bytes(root_pub_cose_key_bstr.clone()),
+            Value::from_slice(&cert_1).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_2).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_3).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_4).expect("failed to deserialize the certificate into CBOR"),
+            Value::from_slice(&cert_5).expect("failed to deserialize the certificate into CBOR"),
+        ]);
+        let identity = Value::Array(vec![
+            Value::Integer(IDENTITY_VERSION.into()),
+            Value::Bytes(cert_chain.to_vec()?),
+        ]);
+        let pvt_key_seed =
+            diced_open_dice::derive_cdi_private_key_seed(&cdi_values_5.cdi_attest).unwrap();
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
+        let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
+            pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
+                ag_err!(InternalError, "error in constructing the private signing key {:?}", e)
+            })?;
+        return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
+    }
+    Err(ag_err!(InternalError, "this method supports the maximum length of 5 for a DICE chain"))
 }
