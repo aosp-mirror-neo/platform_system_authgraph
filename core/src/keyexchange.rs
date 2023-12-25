@@ -300,12 +300,9 @@ impl AuthGraphParticipant {
             sign_key,
         )?;
 
-        // Process/verify peer's cert chain and the peer's signature on the session id and retrieve
-        // the peer's public signing key
-        let verify_key = self
-            .device
-            .borrow()
-            .process_peer_cert_chain(&peer_identity.cert_chain, &*self.crypto.ecdsa)?;
+        // Validate peer's identity and the peer's signature on the session id
+        let verify_key =
+            self.device.borrow().validate_peer_identity(&peer_identity, &*self.crypto.ecdsa)?;
         self.verify_signature_on_session_id(&verify_key, &session_id, peer_sig)?;
 
         // create two arcs encrypting the two shared encrypting keys with the per-boot-key
@@ -374,11 +371,11 @@ impl AuthGraphParticipant {
             ag_err!(InvalidSharedKeyArcs, "authentication_complete is called on invalid session")
         })?;
 
-        // Verify peer's cert chain and the peer's signature on the session id
+        // Validate peer's identity and the peer's signature on the session id
         let verification_key = self
             .device
             .borrow()
-            .process_peer_cert_chain(&in_source_identity.cert_chain, &*self.crypto.ecdsa)?;
+            .validate_peer_identity(&in_source_identity, &*self.crypto.ecdsa)?;
         self.verify_signature_on_session_id(&verification_key, &in_session_id, peer_sig)?;
 
         let updated_shared_key_arcs =
@@ -498,7 +495,7 @@ impl AuthGraphParticipant {
 
         // Construct `CoseSign1`
         let protected =
-            HeaderBuilder::new().algorithm(self.device.borrow().get_cose_sign_algorithm()).build();
+            HeaderBuilder::new().algorithm(self.device.borrow().get_cose_sign_algorithm()?).build();
         let cose_sign1 = CoseSign1Builder::new()
             .protected(protected)
             .try_create_detached_signature(&session_id, &[], |input| match sign_key {
@@ -525,13 +522,13 @@ impl AuthGraphParticipant {
         self.device.borrow().get_version()
     }
 
-    /// Process and extract signature verification key from the peer identity
+    /// Validate and extract signature verification key from the peer's identity
     pub fn peer_verification_key_from_identity(
         &self,
         identity: &[u8],
     ) -> Result<EcVerifyKey, Error> {
         let identity = Identity::from_slice(identity)?;
-        self.device.borrow().process_peer_cert_chain(&identity.cert_chain, &*self.crypto.ecdsa)
+        self.device.borrow().validate_peer_identity(&identity, &*self.crypto.ecdsa)
     }
 
     /// Verify the signature in a CBOR-encoded `COSE_Sign1` with detached payload `session_id`.
@@ -542,35 +539,7 @@ impl AuthGraphParticipant {
         signature: &[u8],
     ) -> Result<(), Error> {
         let cose_sign1 = CoseSign1::from_slice(signature)?;
-        match verify_key {
-            EcVerifyKey::Ed25519(cose_key) => {
-                check_cose_key_params(
-                    cose_key,
-                    iana::KeyType::OKP,
-                    iana::Algorithm::EdDSA,
-                    iana::EllipticCurve::Ed25519,
-                    ErrorCode::InvalidCertChain,
-                )?;
-            }
-            EcVerifyKey::P256(cose_key) => {
-                check_cose_key_params(
-                    cose_key,
-                    iana::KeyType::EC2,
-                    iana::Algorithm::ES256, // ECDSA
-                    iana::EllipticCurve::P_256,
-                    ErrorCode::InvalidCertChain,
-                )?;
-            }
-            EcVerifyKey::P384(cose_key) => {
-                check_cose_key_params(
-                    cose_key,
-                    iana::KeyType::EC2,
-                    iana::Algorithm::ES384,
-                    iana::EllipticCurve::P_384,
-                    ErrorCode::InvalidCertChain,
-                )?;
-            }
-        }
+        verify_key.validate_cose_key_params()?;
         cose_sign1.verify_detached_signature(session_id, &[], |signature, data| {
             self.crypto.ecdsa.verify_signature(verify_key, data, signature)
         })
