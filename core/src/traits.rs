@@ -24,7 +24,7 @@ use crate::key::{
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use authgraph_wire::SESSION_ID_LEN;
-use coset::iana::Algorithm;
+use coset::iana::{Algorithm, EllipticCurve};
 
 /// The first version of the AuthGraph key exchange protocol
 pub const AG_KEY_EXCHANGE_PROTOCOL_VERSION_1: i32 = 1;
@@ -91,6 +91,13 @@ pub trait EcDh: Send {
 /// Trait methods for EC sign/verify with EdDSA (with Ed25519 curve) and ECDSA (with P256 curve and
 /// SHA-256 digest, and P384 curve and SHA-384 digest).
 pub trait EcDsa: Send {
+    /// Generate an ECDSA keypair identified by the given `curve`.
+    ///
+    /// This method is included in the trait for convenience of AuthGraph users; it is not required
+    /// by AuthGraph itself.
+    fn generate_key(&self, _curve: EllipticCurve) -> Result<(EcSignKey, EcVerifyKey), Error> {
+        unimplemented!();
+    }
     /// Compute signature over the given data, using the given EC private key. You can mark this as
     /// unimplemented and instead implement the `sign_data` method in the `Device` trait if the
     /// private signing key is not readily available (i.e. `get_identity` in the `Device` trait
