@@ -16,12 +16,13 @@
 
 //! BoringSSL-based implementation for the AuthGraph `Ec` trait.
 
+use alloc::vec::Vec;
 use authgraph_core::{
     ag_err, ag_verr,
     error::Error,
     key::{
         check_cose_key_params, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey,
-        EcVerifyKey, EcdhSecret,
+        EcVerifyKey, EcdhSecret, CURVE25519_PRIV_KEY_LEN,
     },
     traits, try_to_vec,
 };
@@ -68,6 +69,18 @@ impl traits::EcDh for BoringEcDh {
 pub struct BoringEcDsa;
 
 impl traits::EcDsa for BoringEcDsa {
+    fn generate_key(&self, curve: iana::EllipticCurve) -> Result<(EcSignKey, EcVerifyKey), Error> {
+        match curve {
+            iana::EllipticCurve::P_256 => create_p256_key_pair(iana::Algorithm::ES256)
+                .map(|(priv_key, pub_key)| (EcSignKey::P256(priv_key), EcVerifyKey::P256(pub_key))),
+            iana::EllipticCurve::P_384 => create_p384_key_pair(iana::Algorithm::ES384)
+                .map(|(priv_key, pub_key)| (EcSignKey::P384(priv_key), EcVerifyKey::P384(pub_key))),
+            iana::EllipticCurve::Ed25519 => create_ed25519_key_pair().map(|(priv_key, pub_key)| {
+                (EcSignKey::Ed25519(priv_key), EcVerifyKey::Ed25519(pub_key))
+            }),
+            _ => Err(ag_err!(Unimplemented, "unexpected curve {curve:?} for ECDSA keygen")),
+        }
+    }
     fn sign(&self, sign_key: &EcSignKey, data: &[u8]) -> Result<Vec<u8>, Error> {
         let pkey;
         let mut signer = match sign_key {
@@ -135,9 +148,27 @@ impl traits::EcDsa for BoringEcDsa {
 }
 
 /// Create an EC key pair on P-256 curve and return a tuple consisting of the private key bytes
-/// and the public key as a `CoseKey`.
+/// and the public key as a `CoseKey`.  The `algorithm` parameter indicates the intended use
+/// for the keypair (ECDH or ECDSA).
 pub fn create_p256_key_pair(algorithm: iana::Algorithm) -> Result<(Vec<u8>, CoseKey), Error> {
     let group = ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1))?;
+    create_nist_key_pair(algorithm, iana::EllipticCurve::P_256, group, 32)
+}
+
+/// Create an EC key pair on P-384 curve and return a tuple consisting of the private key bytes
+/// and the public key as a `CoseKey`.  The `algorithm` parameter indicates the intended use
+/// for the keypair (ECDH or ECDSA).
+pub fn create_p384_key_pair(algorithm: iana::Algorithm) -> Result<(Vec<u8>, CoseKey), Error> {
+    let group = ossl!(openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::SECP384R1))?;
+    create_nist_key_pair(algorithm, iana::EllipticCurve::P_384, group, 48)
+}
+
+fn create_nist_key_pair(
+    algorithm: iana::Algorithm,
+    curve: iana::EllipticCurve,
+    group: openssl::ec::EcGroup,
+    coord_len: usize,
+) -> Result<(Vec<u8>, CoseKey), Error> {
     let ec_priv_key = ossl!(openssl::ec::EcKey::<openssl::pkey::Private>::generate(&group))?;
     // Convert the private key to DER-encoded `ECPrivateKey` as per RFC5915 s3, which is
     // our choice of private key encoding.
@@ -151,28 +182,55 @@ pub fn create_p256_key_pair(algorithm: iana::Algorithm) -> Result<(Vec<u8>, Cose
         openssl::ec::PointConversionForm::UNCOMPRESSED,
         bn_ctx.deref_mut()
     ))?;
-    let (x, y) = crate::ec::coords_from_p256_pub_key(&pub_key_sec1)?;
-    let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(iana::EllipticCurve::P_256, x, y)
-        .algorithm(algorithm)
+    let (x, y) = crate::ec::coords_from_nist_pub_key(&pub_key_sec1, coord_len)?;
+    let pub_key = coset::CoseKeyBuilder::new_ec2_pub_key(curve, x, y).algorithm(algorithm).build();
+    Ok((priv_key, pub_key))
+}
+
+fn create_ed25519_key_pair() -> Result<([u8; CURVE25519_PRIV_KEY_LEN], CoseKey), Error> {
+    let pkey = ossl!(openssl::pkey::PKey::generate_ed25519())?;
+    let priv_key = ossl!(pkey.raw_private_key())?;
+    let priv_key: [u8; CURVE25519_PRIV_KEY_LEN] = priv_key
+        .try_into()
+        .map_err(|e| ag_err!(InternalError, "generated Ed25519 key of unexpected size: {:?}", e))?;
+    let raw_pub_key = ossl!(pkey.raw_public_key())?;
+    let pub_key = coset::CoseKeyBuilder::new_okp_key()
+        .param(iana::OkpKeyParameter::Crv as i64, Value::from(iana::EllipticCurve::Ed25519 as u64))
+        .param(iana::OkpKeyParameter::X as i64, Value::from(raw_pub_key))
+        .algorithm(coset::iana::Algorithm::EdDSA)
         .build();
     Ok((priv_key, pub_key))
 }
 
-/// Helper function to return the (x,y) coordinates, given the public key as a SEC-1 encoded
+/// Helper function to return the (x,y) coordinates of a P-256 public key, as a SEC-1 encoded
 /// uncompressed point. 0x04: uncompressed, followed by x || y coordinates.
 pub fn coords_from_p256_pub_key(pub_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let coord_len = 32; // For P-256
+    coords_from_nist_pub_key(pub_key, 32) // For P-256
+}
+
+/// Helper function to return the (x,y) coordinates of a P-384 public key, as a SEC-1 encoded
+/// uncompressed point. 0x04: uncompressed, followed by x || y coordinates.
+pub fn coords_from_p384_pub_key(pub_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    coords_from_nist_pub_key(pub_key, 48) // For P-384
+}
+
+/// Helper function to return the (x,y) coordinates, given the public key as a SEC-1 encoded
+/// uncompressed point. 0x04: uncompressed, followed by x || y coordinates.
+pub fn coords_from_nist_pub_key(
+    pub_key: &[u8],
+    coord_len: usize,
+) -> Result<(Vec<u8>, Vec<u8>), Error> {
     if pub_key.len() != (1 + 2 * coord_len) {
         return Err(ag_err!(
             InternalError,
-            "unexpected SEC1 pubkey len of {} for P-256",
+            "unexpected SEC1 pubkey len of {} for coord_len {coord_len}",
             pub_key.len(),
         ));
     }
     if pub_key[0] != SEC1_UNCOMPRESSED_PREFIX {
         return Err(ag_err!(
             InternalError,
-            "unexpected SEC1 pubkey initial byte {} for P-256",
+            "unexpected SEC1 pubkey initial byte {} for coord_len {coord_len}",
             pub_key[0],
         ));
     }
@@ -288,4 +346,49 @@ fn ed25519_ecdsa_pkey_from_cose(
     let pkey =
         ossl!(openssl::pkey::PKey::public_key_from_raw_bytes(x, openssl::pkey::Id::ED25519))?;
     Ok(pkey)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use authgraph_core::traits::EcDsa;
+
+    #[test]
+    fn test_p256_keygen() {
+        let ecdsa = BoringEcDsa;
+        let (priv_key, pub_key) = ecdsa.generate_key(iana::EllipticCurve::P_256).unwrap();
+        assert!(matches!(priv_key, EcSignKey::P256(_)));
+        let cose_key = if let EcVerifyKey::P256(cose_key) = pub_key {
+            cose_key
+        } else {
+            panic!("Unexpected pub key variant from generate_key()");
+        };
+        assert!(p256_ecdsa_pkey_from_cose(&cose_key).is_ok());
+    }
+
+    #[test]
+    fn test_p384_keygen() {
+        let ecdsa = BoringEcDsa;
+        let (priv_key, pub_key) = ecdsa.generate_key(iana::EllipticCurve::P_384).unwrap();
+        assert!(matches!(priv_key, EcSignKey::P384(_)));
+        let cose_key = if let EcVerifyKey::P384(cose_key) = pub_key {
+            cose_key
+        } else {
+            panic!("Unexpected pub key variant from generate_key()");
+        };
+        assert!(p384_ecdsa_pkey_from_cose(&cose_key).is_ok());
+    }
+
+    #[test]
+    fn test_ed25519_keygen() {
+        let ecdsa = BoringEcDsa;
+        let (priv_key, pub_key) = ecdsa.generate_key(iana::EllipticCurve::Ed25519).unwrap();
+        assert!(matches!(priv_key, EcSignKey::Ed25519(_)));
+        let cose_key = if let EcVerifyKey::Ed25519(cose_key) = pub_key {
+            cose_key
+        } else {
+            panic!("Unexpected pub key variant from generate_key()");
+        };
+        assert!(ed25519_ecdsa_pkey_from_cose(&cose_key).is_ok());
+    }
 }
