@@ -16,10 +16,16 @@
 
 //! Tests for BoringSSL-based implementations of AuthGraph traits.
 use alloc::rc::Rc;
-use authgraph_core::{key::Identity, keyexchange};
+use authgraph_core::{
+    key::{
+        CertChain, EcSignKey, EcVerifyKey, Identity, EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION,
+        IDENTITY_VERSION,
+    },
+    keyexchange,
+};
 use authgraph_core_test as ag_test;
 use core::cell::RefCell;
-use coset::{iana, CborSerializable};
+use coset::{cbor::value::Value, iana, CborOrdering, CborSerializable, Label};
 
 #[test]
 fn test_rng() {
@@ -256,4 +262,59 @@ fn test_key_exchange_with_mixed_dice_chains() {
     ag_test::test_key_exchange_init(&mut source, &mut sink);
     ag_test::test_key_exchange_finish(&mut source, &mut sink);
     ag_test::test_key_exchange_auth_complete(&mut source, &mut sink);
+}
+
+#[test]
+#[should_panic(expected = "root key is not in the required canonical form")]
+fn test_get_identity_with_root_key_in_incorrect_canonical_form() {
+    // Check that the `Identity` returned from `get_identity` in the `Device` trait fails the
+    // validation, given that the root key is in incorrect canonical form.
+    let test_device = crate::test_device::AgDevice::default();
+    let (priv_key, mut pub_key) = crate::ec::create_p256_key_pair(iana::Algorithm::ES256).unwrap();
+    let mut test_params = Vec::<(Label, Value)>::new();
+    for param in pub_key.params {
+        test_params.push(param);
+    }
+    test_params.push((Label::Int(23), Value::Text("test1".to_string())));
+    test_params.push((Label::Int(1234), Value::Text("test2".to_string())));
+    pub_key.params = test_params;
+    pub_key.canonicalize(CborOrdering::LengthFirstLexicographic);
+    let identity = Identity {
+        version: IDENTITY_VERSION,
+        cert_chain: CertChain {
+            version: EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION,
+            root_key: EcVerifyKey::P256(pub_key),
+            dice_cert_chain: None,
+        },
+        policy: None,
+    };
+    test_device.set_identity((EcSignKey::P256(priv_key), identity), iana::Algorithm::ES256);
+    ag_test::test_get_identity(&test_device, &crate::BoringEcDsa);
+}
+
+#[test]
+fn test_get_identity_with_root_key_in_correct_canonical_form() {
+    // Check that the `Identity` returned from `get_identity` in the `Device` trait passes the
+    // validation, given that the root key is in correct canonical form.
+    let test_device = crate::test_device::AgDevice::default();
+    let (priv_key, mut pub_key) = crate::ec::create_p256_key_pair(iana::Algorithm::ES256).unwrap();
+    let mut test_params = Vec::<(Label, Value)>::new();
+    for param in pub_key.params {
+        test_params.push(param);
+    }
+    test_params.push((Label::Int(23), Value::Text("test1".to_string())));
+    test_params.push((Label::Int(1234), Value::Text("test2".to_string())));
+    pub_key.params = test_params;
+    pub_key.canonicalize(CborOrdering::Lexicographic);
+    let identity = Identity {
+        version: IDENTITY_VERSION,
+        cert_chain: CertChain {
+            version: EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION,
+            root_key: EcVerifyKey::P256(pub_key),
+            dice_cert_chain: None,
+        },
+        policy: None,
+    };
+    test_device.set_identity((EcSignKey::P256(priv_key), identity), iana::Algorithm::ES256);
+    ag_test::test_get_identity(&test_device, &crate::BoringEcDsa);
 }
