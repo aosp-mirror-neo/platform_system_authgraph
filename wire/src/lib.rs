@@ -27,6 +27,7 @@ use ciborium::value::Value;
 use enumn::N;
 
 pub mod cbor;
+pub mod fragmentation;
 
 #[cfg(test)]
 mod tests;
