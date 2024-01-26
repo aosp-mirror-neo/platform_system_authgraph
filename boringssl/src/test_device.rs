@@ -27,7 +27,7 @@ use authgraph_core::{
 };
 use authgraph_wire::{ErrorCode, SESSION_ID_LEN};
 use core::cell::RefCell;
-use coset::iana;
+use coset::{iana, CborOrdering};
 
 /// The struct implementing the Authgraph `Device` trait.
 pub struct AgDevice {
@@ -92,8 +92,8 @@ impl traits::Device for AgDevice {
     /// DiceCertChainInitialPayload is an EC public key on P-256 curve in the default implementation
     fn get_identity(&self) -> Result<(Option<EcSignKey>, Identity), Error> {
         if self.identity.borrow().is_none() {
-            let (priv_key, pub_key) = crate::ec::create_p256_key_pair(iana::Algorithm::ES256)?;
-
+            let (priv_key, mut pub_key) = crate::ec::create_p256_key_pair(iana::Algorithm::ES256)?;
+            pub_key.canonicalize(CborOrdering::Lexicographic);
             let identity = Identity {
                 version: IDENTITY_VERSION,
                 cert_chain: CertChain {

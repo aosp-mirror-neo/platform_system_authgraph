@@ -23,8 +23,8 @@ use crate::{ag_err, ag_verr};
 use alloc::{string::String, vec::Vec};
 use authgraph_wire as wire;
 use coset::{
-    cbor, cbor::value::Value, iana, AsCborValue, CborSerializable, CoseError, CoseKey, CoseSign1,
-    Label,
+    cbor, cbor::value::Value, iana, AsCborValue, CborOrdering, CborSerializable, CoseError,
+    CoseKey, CoseSign1, Label,
 };
 use wire::ErrorCode;
 use zeroize::ZeroizeOnDrop;
@@ -189,6 +189,23 @@ impl EcVerifyKey {
     pub fn get_key(self) -> CoseKey {
         match self {
             EcVerifyKey::Ed25519(k) | EcVerifyKey::P256(k) | EcVerifyKey::P384(k) => k,
+        }
+    }
+
+    /// Validate whether the CoseKey is in the expected canonical form as per the spec.
+    pub fn is_canonicalized(&self) -> bool {
+        let mut expected = self.clone();
+        expected.canonicalize_cose_key();
+        *self == expected
+    }
+
+    /// Order the labels of the Cose Key, in order to ensure canonical encoding in accordance with
+    /// Core Deterministic Encoding Requirements [RFC 8949 s4.2.1].
+    pub fn canonicalize_cose_key(&mut self) {
+        match self {
+            EcVerifyKey::Ed25519(k) | EcVerifyKey::P256(k) | EcVerifyKey::P384(k) => {
+                k.canonicalize(CborOrdering::Lexicographic);
+            }
         }
     }
 
@@ -463,8 +480,10 @@ impl CborSerializable for Identity {}
 impl CertChain {
     /// Perform the following validations on the decoded DICE cert chain:
     /// 1. correctness of the `version`
-    /// 2. correctness of Cose key parameters of the `root_key`
-    /// 3. if dice_cert_chain is present, check for each DiceChainEntry,
+    /// 2. `root_key` is in accordance with Core Deterministic Encoding Requirements
+    ///    [RFC 8949 s4.2.1]
+    /// 3. correctness of Cose key parameters of the `root_key`
+    /// 4. if dice_cert_chain is present, check for each DiceChainEntry,
     ///    i.  Cose key parameters of `subject_pub_key`
     ///    ii. the signature is verified with the parent's `subject_pub_key` or with the `root_key`
     ///        for the first DiceChainEntry
@@ -474,6 +493,12 @@ impl CertChain {
     pub fn validate(&self, ecdsa: &dyn EcDsa) -> Result<EcVerifyKey, Error> {
         if self.version != EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION {
             return Err(ag_err!(InvalidCertChain, "version mismatch"));
+        }
+        if !self.root_key.is_canonicalized() {
+            return Err(ag_err!(
+                InvalidCertChain,
+                "root key is not in the required canonical form"
+            ));
         }
         self.root_key.validate_cose_key_params()?;
         match &self.dice_cert_chain {
@@ -550,7 +575,6 @@ impl AsCborValue for CertChain {
         } else {
             None
         };
-        // TODO: Confirm whether root key is a bstr or a map with a single entry.
         let root_cose_key = match array.remove(1) {
             Value::Bytes(root_key_encoded) => {
                 let cose_key = CoseKey::from_slice(&root_key_encoded)?;
@@ -573,10 +597,15 @@ impl AsCborValue for CertChain {
         })
     }
 
-    fn to_cbor_value(self) -> Result<Value, CoseError> {
+    fn to_cbor_value(mut self) -> Result<Value, CoseError> {
         let mut array = Vec::<Value>::new();
         array.try_reserve(2).map_err(|_| CoseError::EncodeFailed)?;
         array.push(Value::Integer(self.version.into()));
+        // Prepare the root key to be encoded in accordance with
+        // Core Deterministic Encoding Requirements [RFC 8949 s4.2.1], as specified in
+        // hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/
+        // ExplicitKeyDiceCertChain.cddl
+        self.root_key.canonicalize_cose_key();
         array.push(Value::Bytes(self.root_key.get_key().to_vec()?));
         if let Some(dice_chain_entries) = self.dice_cert_chain {
             let len = dice_chain_entries.len();
