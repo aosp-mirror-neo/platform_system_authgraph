@@ -149,6 +149,9 @@ impl AuthGraphParticipant {
             &mut *self.crypto.rng,
         )?;
         let (_sign_key, identity) = self.device.borrow().get_identity()?;
+        // Validate the identity returned from the trait implementation during the first time it is
+        // retrieved from the AuthGraphParticipant.
+        identity.validate(&*self.crypto.ecdsa)?;
         let ke_key =
             Key { pub_key: Some(pub_key_for_ecdh.0.to_vec()?), arc_from_pbk: Some(priv_key_arc) };
         let ke_digest = compute_ke_key_digest(&ke_key, &*self.crypto.sha256)?;
@@ -181,7 +184,9 @@ impl AuthGraphParticipant {
         let ecdh_secret =
             compute_shared_secret(&*self.crypto.ecdh, &key_for_ecdh.priv_key, &peer_pub_key)?;
         let (sign_key, own_identity) = self.device.borrow().get_identity()?;
-
+        // Validate the identity returned from the trait implementation during the first time it is
+        // retrieved from the AuthGraphParticipant.
+        own_identity.validate(&*self.crypto.ecdsa)?;
         let salt_input = SaltInput {
             source_version: peer_version,
             sink_ke_pub_key: key_for_ecdh.pub_key.clone(),

@@ -6,7 +6,9 @@ use authgraph_core::key::{
     CURVE25519_PRIV_KEY_LEN, EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION, IDENTITY_VERSION,
 };
 use authgraph_core::keyexchange;
-use authgraph_core::traits::{AesGcm, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256};
+use authgraph_core::traits::{
+    AesGcm, Device, EcDh, EcDsa, Hkdf, Hmac, MonotonicClock, Rng, Sha256,
+};
 use authgraph_core::{ag_err, error::Error};
 use authgraph_wire::ErrorCode;
 use coset::{
@@ -1221,4 +1223,11 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         return Ok((EcSignKey::Ed25519(pvt_key), identity.to_vec()?));
     }
     Err(ag_err!(InternalError, "this method supports the maximum length of 5 for a DICE chain"))
+}
+
+/// Add a smoke test for `get_identity` in the `Device` trait, to ensure that the returned Identity
+/// passes a set of validation.
+pub fn test_get_identity<D: Device, E: EcDsa>(ag_device: &D, ecdsa: &E) {
+    let (_, identity) = ag_device.get_identity().unwrap();
+    identity.validate(ecdsa).unwrap();
 }
