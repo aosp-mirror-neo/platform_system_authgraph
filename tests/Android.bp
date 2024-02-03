@@ -28,6 +28,7 @@ rust_library {
         "libauthgraph_core",
         "libauthgraph_wire",
         "libcoset",
+        "libdiced_open_dice",
         "libhex",
     ],
 }

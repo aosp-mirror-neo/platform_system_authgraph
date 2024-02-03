@@ -15,17 +15,16 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Traits representing crypto abstractions and device specific functionality.
-use crate::ag_err;
 use crate::error::Error;
 use crate::key::{
-    AesKey, CertChain, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey,
-    EcdhSecret, HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
-    PseudoRandKey,
+    AesKey, EcExchangeKey, EcExchangeKeyPriv, EcExchangeKeyPub, EcSignKey, EcVerifyKey, EcdhSecret,
+    HmacKey, Identity, IdentityVerificationDecision, MillisecondsSinceEpoch, Nonce12,
+    PseudoRandKey, AES_256_KEY_LEN, SHA_256_LEN,
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use authgraph_wire::ErrorCode;
-use coset::iana::Algorithm;
+use authgraph_wire::SESSION_ID_LEN;
+use coset::iana::{Algorithm, EllipticCurve};
 
 /// The first version of the AuthGraph key exchange protocol
 pub const AG_KEY_EXCHANGE_PROTOCOL_VERSION_1: i32 = 1;
@@ -52,7 +51,7 @@ pub struct CryptoTraitImpl {
 pub trait AesGcm: Send {
     /// Generate a key
     fn generate_key(&self, rng: &mut dyn Rng) -> Result<AesKey, Error> {
-        let mut key = AesKey([0; 32]);
+        let mut key = AesKey([0; AES_256_KEY_LEN]);
         rng.fill_bytes(&mut key.0);
         Ok(key)
     }
@@ -72,6 +71,8 @@ pub trait AesGcm: Send {
         aad: &[u8],
         nonce: &Nonce12,
     ) -> Result<Vec<u8>, Error>;
+    /// Emit a copy of the trait implementation, as a boxed trait object.
+    fn box_clone(&self) -> Box<dyn AesGcm>;
 }
 
 /// Trait methods for ECDH key exchange with P256 curve
@@ -90,6 +91,13 @@ pub trait EcDh: Send {
 /// Trait methods for EC sign/verify with EdDSA (with Ed25519 curve) and ECDSA (with P256 curve and
 /// SHA-256 digest, and P384 curve and SHA-384 digest).
 pub trait EcDsa: Send {
+    /// Generate an ECDSA keypair identified by the given `curve`.
+    ///
+    /// This method is included in the trait for convenience of AuthGraph users; it is not required
+    /// by AuthGraph itself.
+    fn generate_key(&self, _curve: EllipticCurve) -> Result<(EcSignKey, EcVerifyKey), Error> {
+        unimplemented!();
+    }
     /// Compute signature over the given data, using the given EC private key. You can mark this as
     /// unimplemented and instead implement the `sign_data` method in the `Device` trait if the
     /// private signing key is not readily available (i.e. `get_identity` in the `Device` trait
@@ -122,17 +130,19 @@ pub trait Hkdf: Send {
 /// Trait method for computing cryptographic hash function on an input that outputs 256-bit hash.
 pub trait Sha256: Send {
     /// Compute SHA256 over an input
-    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; 32], Error>;
+    fn compute_sha256(&self, data: &[u8]) -> Result<[u8; SHA_256_LEN], Error>;
 }
 
 /// Trait methods for generating cryptographically secure random numbers
-pub trait Rng: Send {
+pub trait Rng {
     /// Create a cryptographically secure random bytes
-    fn fill_bytes(&mut self, nonce: &mut [u8]);
+    fn fill_bytes(&self, nonce: &mut [u8]);
+    /// Emit a copy of the trait implementation, as a boxed trait object.
+    fn box_clone(&self) -> Box<dyn Rng>;
 }
 
 /// Trait methods for retrieving device specific information and for device specific functionality
-pub trait Device: Send {
+pub trait Device {
     /// Retrieve (or create) the ephemeral (with per-boot life time) 256-bits encryption key to be
     /// used with AES-GCM
     fn get_or_create_per_boot_key(
@@ -146,27 +156,24 @@ pub trait Device: Send {
     /// Retrieve the identity of the AuthGraph participant, along with the signing key
     fn get_identity(&self) -> Result<(Option<EcSignKey>, Identity), Error>;
     /// Retrieve the Cose signing algorithm corresponding to the signing key pair of the party.
-    fn get_cose_sign_algorithm(&self) -> Algorithm;
+    fn get_cose_sign_algorithm(&self) -> Result<Algorithm, Error>;
     /// Compute signature over the given data. This is an alternative to the `sign` method in the
     /// `EcDsa` trait, when the private signing key is not readily available (i.e. `get_identity` in
     /// the `Device` trait returns `None` for the first element of the returned tuple). If the
     /// private signing key is returned from `get_identity` method, you can mark this as
     /// unimplemented and instead implement `sign` method in the `EcDsa` trait.
     fn sign_data(&self, ecdsa: &dyn EcDsa, data: &[u8]) -> Result<Vec<u8>, Error>;
-    /// Process the peer's DICE certificate chain if it is part of the `CertChain`, i.e. verify
-    /// the chain of signatures and any other required information in the certificate chain and
-    /// return the signature verification key.
-    /// In the default implementation, we assume that the `dice_cert_chain` is None and return the
-    /// root key as the signature verification key.
-    fn process_peer_cert_chain(
+    /// Validate the peer's identity (e.g. if `cert_chain` is present, validate the chain of
+    /// signatures and any other required information in the certificate chain) and return the
+    /// signature verification key.
+    /// The default implementation calls the helper functions that perform the minimum required
+    /// validation and extraction of the signature verification key.
+    fn validate_peer_identity(
         &self,
-        cert_chain: &CertChain,
-        _ec: &dyn EcDsa,
+        identity: &Identity,
+        ecdsa: &dyn EcDsa,
     ) -> Result<EcVerifyKey, Error> {
-        match cert_chain.dice_cert_chain {
-            None => Ok(cert_chain.root_key.clone()),
-            Some(_) => Err(ag_err!(Unimplemented, "No code for checking DICE chain!")),
-        }
+        identity.validate(ecdsa)
     }
     /// Obtain the identity verification decision, by evaluating the latest identity against the
     /// previous identity.
@@ -201,7 +208,7 @@ pub trait Device: Send {
     fn record_shared_sessions(
         &mut self,
         peer_identity: &Identity,
-        session_id: &[u8; 32],
+        session_id: &[u8; SESSION_ID_LEN],
         shared_keys: &[Vec<u8>; 2],
         sha256: &dyn Sha256,
     ) -> Result<(), Error>;
@@ -211,7 +218,7 @@ pub trait Device: Send {
     fn validate_shared_sessions(
         &self,
         peer_identity: &Identity,
-        session_id: &[u8; 32],
+        session_id: &[u8; SESSION_ID_LEN],
         shared_keys: &[Vec<u8>],
         sha256: &dyn Sha256,
     ) -> Result<(), Error>;

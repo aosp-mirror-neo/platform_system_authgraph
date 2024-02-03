@@ -27,9 +27,13 @@ use ciborium::value::Value;
 use enumn::N;
 
 pub mod cbor;
+pub mod fragmentation;
 
 #[cfg(test)]
 mod tests;
+
+/// Length of a session identifier in bytes
+pub const SESSION_ID_LEN: usize = 32;
 
 // Request/Response pairs corresponding to each of the methods on the `IAuthGraphKeyExchange`
 // interface.  Structures that have a single field containing CBOR-encoded data are directly
