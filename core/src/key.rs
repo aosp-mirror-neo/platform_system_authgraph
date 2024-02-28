@@ -192,6 +192,14 @@ impl EcVerifyKey {
         }
     }
 
+    /// Similar to `get_key()`, return the `CoseKey` contained in any variant of this enum
+    /// (but by reference).
+    pub fn get_key_ref(&self) -> &CoseKey {
+        match self {
+            EcVerifyKey::Ed25519(k) | EcVerifyKey::P256(k) | EcVerifyKey::P384(k) => k,
+        }
+    }
+
     /// Validate whether the CoseKey is in the expected canonical form as per the spec.
     pub fn is_canonicalized(&self) -> bool {
         let mut expected = self.clone();
