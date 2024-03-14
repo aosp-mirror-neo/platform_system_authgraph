@@ -124,7 +124,7 @@ pub fn create_arc(
     let arc = CoseEncrypt0Builder::new()
         .protected(protected_hdr.build())
         .unprotected(unprotected_hdr.build())
-        .try_create_ciphertext(&arc_content.payload.0.clone(), &[], |input, aad| {
+        .try_create_ciphertext(&arc_content.payload.0, &[], |input, aad| {
             cipher.encrypt(encrypting_key, input, aad, &nonce_for_enc)
         })?
         .build();

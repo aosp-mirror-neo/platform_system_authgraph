@@ -632,7 +632,7 @@ impl AsCborValue for DiceChainEntry {
     fn from_cbor_value(value: Value) -> Result<Self, CoseError> {
         let signature = CoseSign1::from_cbor_value(value)?;
         let payload = DiceChainEntryPayload::from_slice(
-            &signature.payload.clone().ok_or(CoseError::EncodeFailed)?,
+            signature.payload.as_ref().ok_or(CoseError::EncodeFailed)?,
         )?;
         Ok(DiceChainEntry { signature, payload })
     }
