@@ -59,6 +59,7 @@ rust_test {
     rustlibs: [
         "libauthgraph_wire",
         "libcoset",
+        "libhex",
         "liblog_rust",
         "libzeroize",
     ],
