@@ -20,7 +20,10 @@ use crate::error::Error;
 use crate::traits::{EcDsa, Rng};
 use crate::FallibleAllocExt;
 use crate::{ag_err, ag_verr};
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use authgraph_wire as wire;
 use coset::{
     cbor, cbor::value::Value, iana, AsCborValue, CborOrdering, CborSerializable, CoseError,
@@ -313,9 +316,23 @@ pub struct DiceChainEntry {
     /// A certificate is represented as CoseSign1. The `payload` field of CoseSign1 holds the CBOR
     /// encoded payload that was signed.
     pub signature: CoseSign1,
-    /// The payload signed in the certificate is decoded as `DiceChainEntryPayload` for validation
-    /// purposes.
-    pub payload: DiceChainEntryPayload,
+    /// The payload signed in the certificate is partially decoded as
+    /// `DiceChainEntryPayloadPartiallyDecoded` for validation purposes.
+    pub payload: DiceChainEntryPayloadPartiallyDecoded,
+}
+
+/// Partially decoded payload for each entry in the DICE chain
+#[derive(Default, Clone, PartialEq)]
+pub struct DiceChainEntryPayloadPartiallyDecoded {
+    /// Issuer of the DiceChainEntry. Required as per the CDDL.
+    pub issuer: Option<String>,
+    /// The party whom the certificate is issued to. Required as per the CDDL.
+    pub subject: Option<String>,
+    /// Public signing key of the party whom the certificate is issued to. Required as per the CDDL.
+    pub subject_pub_key: Option<EcVerifyKey>,
+    /// The complete CBOR map containing all the fields (including the fields above) of the
+    /// DiceChainEntryPayload
+    pub full_map: Option<Value>,
 }
 
 /// Payload for each entry in the DICE chain
@@ -640,7 +657,7 @@ impl CborSerializable for CertChain {}
 impl AsCborValue for DiceChainEntry {
     fn from_cbor_value(value: Value) -> Result<Self, CoseError> {
         let signature = CoseSign1::from_cbor_value(value)?;
-        let payload = DiceChainEntryPayload::from_slice(
+        let payload = DiceChainEntryPayloadPartiallyDecoded::from_slice(
             signature.payload.as_ref().ok_or(CoseError::EncodeFailed)?,
         )?;
         Ok(DiceChainEntry { signature, payload })
@@ -652,6 +669,72 @@ impl AsCborValue for DiceChainEntry {
         // contains the additional `payload` field only for the purpose of validation, therefore, it
         // does not need to be included in the CBOR encoding.
         self.signature.to_cbor_value()
+    }
+}
+
+impl CborSerializable for DiceChainEntryPayloadPartiallyDecoded {}
+
+impl AsCborValue for DiceChainEntryPayloadPartiallyDecoded {
+    fn from_cbor_value(value: Value) -> Result<Self, CoseError> {
+        let payload_map = match value {
+            Value::Map(ref map) => map,
+            _ => {
+                return Err(CoseError::UnexpectedItem("non-map", "map of entries"));
+            }
+        };
+        let mut dice_chain_entry_payload = DiceChainEntryPayloadPartiallyDecoded::default();
+        for (key, val) in payload_map {
+            let key_int: i64 = key
+                .as_integer()
+                .ok_or(CoseError::UnexpectedItem("None", "an Integer"))?
+                .try_into()
+                .map_err(|_| CoseError::UnexpectedItem("error", "an Integer convertible to i64"))?;
+            match (key_int, val) {
+                (ISS, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
+                    None => dice_chain_entry_payload.issuer = Some(issuer.to_string()),
+                    Some(_) => {
+                        return Err(CoseError::UnexpectedItem(
+                            "single entry for issuer",
+                            "repeated entries for issuer",
+                        ));
+                    }
+                },
+                (SUB, Value::Text(subject)) => match dice_chain_entry_payload.subject {
+                    None => dice_chain_entry_payload.subject = Some(subject.to_string()),
+                    Some(_) => {
+                        return Err(CoseError::UnexpectedItem(
+                            "single entry for subject",
+                            "repeated entries for subject",
+                        ));
+                    }
+                },
+                (SUBJECT_PUBLIC_KEY, Value::Bytes(sp_key_bytes)) => {
+                    match dice_chain_entry_payload.subject_pub_key {
+                        None => {
+                            let cose_key = CoseKey::from_slice(sp_key_bytes)?;
+                            let ec_verify_key = EcVerifyKey::from_cose_key(cose_key)?;
+                            dice_chain_entry_payload.subject_pub_key = Some(ec_verify_key);
+                        }
+                        Some(_) => {
+                            return Err(CoseError::UnexpectedItem(
+                                "single entry for subject public key",
+                                "repeated entries for subject public key",
+                            ));
+                        }
+                    }
+                }
+                (_k, _v) => {}
+            }
+        }
+        dice_chain_entry_payload.full_map = Some(value);
+        Ok(dice_chain_entry_payload)
+    }
+
+    fn to_cbor_value(self) -> Result<Value, CoseError> {
+        // This is not implemented because Authgraph protocol retrieves an already encoded DICE
+        // chain via `Device` trait and the first field of `DiceChainEntry` has the encoded payload
+        // that is signed.
+        unimplemented!()
     }
 }
 
@@ -1013,6 +1096,7 @@ mod tests {
         ))
         .unwrap();
 
+        assert!(DiceChainEntryPayloadPartiallyDecoded::from_slice(&data).is_ok());
         assert!(DiceChainEntryPayload::from_slice(&data).is_ok());
     }
 }
