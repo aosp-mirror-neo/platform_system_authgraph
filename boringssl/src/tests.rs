@@ -206,6 +206,11 @@ fn test_identity_validation() {
 }
 
 #[test]
+fn test_example_identity_validate() {
+    ag_test::test_example_identity_validate(&crate::BoringEcDsa);
+}
+
+#[test]
 fn test_key_exchange_with_non_empty_dice_chains() {
     // Both parties have identities containing a DICE certificate chains of non-zero length.
     let source_device = crate::test_device::AgDevice::default();

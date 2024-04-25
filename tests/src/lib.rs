@@ -1231,3 +1231,13 @@ pub fn test_get_identity<D: Device, E: EcDsa>(ag_device: &D, ecdsa: &E) {
     let (_, identity) = ag_device.get_identity().unwrap();
     identity.validate(ecdsa).unwrap();
 }
+
+/// Test validation of a sample BCC identity.
+pub fn test_example_identity_validate<E: EcDsa>(ecdsa: &E) {
+    let mut hex_data =
+        std::str::from_utf8(include_bytes!("../testdata/sample_identity.hex")).unwrap().to_string();
+    hex_data.retain(|c| !c.is_whitespace());
+    let data = hex::decode(hex_data).unwrap();
+    let identity = Identity::from_slice(&data).expect("identity data did not decode");
+    identity.validate(ecdsa).expect("identity did not validate");
+}
