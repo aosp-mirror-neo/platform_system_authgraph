@@ -50,6 +50,7 @@ rust_test {
     ],
     rustlibs: [
         "libauthgraph_core_test",
+        "libhex",
     ],
     test_options: {
         unit_test: true,

@@ -26,6 +26,6 @@ rust_proc_macro {
     rustlibs: [
         "libproc_macro2",
         "libquote",
-        "libsyn_deprecated",
+        "libsyn",
     ],
 }
