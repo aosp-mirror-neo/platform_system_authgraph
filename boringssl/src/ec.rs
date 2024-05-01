@@ -16,6 +16,7 @@
 
 //! BoringSSL-based implementation for the AuthGraph `Ec` trait.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use authgraph_core::{
     ag_err, ag_verr,
@@ -113,7 +114,14 @@ impl traits::EcDsa for BoringEcDsa {
                 ossl!(openssl::sign::Signer::new(digest, &pkey))
             }
         }?;
-        ossl!(signer.sign_oneshot_to_vec(data))
+        let sig = ossl!(signer.sign_oneshot_to_vec(data))?;
+        match sign_key {
+            EcSignKey::Ed25519(_) => Ok(sig),
+            // BoringSSL emits signatures encoded in an `Ecdsa-Sig-Value` DER structure, as per
+            // RFC 3279 section 2.2.3.  Convert this to R | S form.
+            EcSignKey::P256(_) => ec_der_signature_to_cose(32, &sig),
+            EcSignKey::P384(_) => ec_der_signature_to_cose(48, &sig),
+        }
     }
 
     fn verify_signature(
@@ -122,6 +130,14 @@ impl traits::EcDsa for BoringEcDsa {
         data: &[u8],
         signature: &[u8],
     ) -> Result<(), Error> {
+        let signature = match verify_key {
+            EcVerifyKey::Ed25519(_) => Cow::Borrowed(signature),
+            // For NIST curves, convert the R|S format signature to the DER-encoded form that
+            // BoringSSL expects.
+            EcVerifyKey::P256(_) => Cow::Owned(ec_cose_signature_to_der(32, signature)?),
+            EcVerifyKey::P384(_) => Cow::Owned(ec_cose_signature_to_der(48, signature)?),
+        };
+
         let pkey;
         let mut verifier = match verify_key {
             EcVerifyKey::Ed25519(key) => {
@@ -139,12 +155,39 @@ impl traits::EcDsa for BoringEcDsa {
                 ossl!(openssl::sign::Verifier::new(digest, &pkey))
             }
         }?;
-        if ossl!(verifier.verify_oneshot(signature, data))? {
+        if ossl!(verifier.verify_oneshot(&signature, data))? {
             Ok(())
         } else {
             Err(ag_err!(InvalidSignature, "signature verification failed"))
         }
     }
+}
+
+/// Convert a R | S format NIST signature to a DER-encoded form.
+fn ec_cose_signature_to_der(coord_len: usize, signature: &[u8]) -> Result<Vec<u8>, Error> {
+    if signature.len() != 2 * coord_len {
+        return Err(ag_err!(
+            InvalidSignature,
+            "expected signature of length {0}+{0}, got {1}",
+            coord_len,
+            signature.len()
+        ));
+    }
+    let r = ossl!(openssl::bn::BigNum::from_slice(&signature[..coord_len]))?;
+    let s = ossl!(openssl::bn::BigNum::from_slice(&signature[coord_len..]))?;
+    let signature = ossl!(openssl::ecdsa::EcdsaSig::from_private_components(r, s))?;
+    ossl!(signature.to_der())
+}
+
+/// Convert a DER-encoded EC NIST signature to R | S form
+fn ec_der_signature_to_cose(coord_len: usize, signature: &[u8]) -> Result<Vec<u8>, Error> {
+    let coord_len: i32 = coord_len
+        .try_into()
+        .map_err(|_e| ag_err!(InvalidSignature, "invalid coord len {coord_len}"))?;
+    let signature = ossl!(openssl::ecdsa::EcdsaSig::from_der(signature))?;
+    let mut sig = ossl!(signature.r().to_vec_padded(coord_len))?;
+    sig.extend_from_slice(&ossl!(signature.s().to_vec_padded(coord_len))?);
+    Ok(sig)
 }
 
 /// Create an EC key pair on P-256 curve and return a tuple consisting of the private key bytes
@@ -390,5 +433,163 @@ mod tests {
             panic!("Unexpected pub key variant from generate_key()");
         };
         assert!(ed25519_ecdsa_pkey_from_cose(&cose_key).is_ok());
+    }
+
+    #[test]
+    fn test_signature_convert() {
+        let tests = [
+            (32,
+             concat!(
+                 "3045", // SEQUENCE
+                 "0220", // INTEGER len x20
+                 "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                 "0221", // INTEGER len x21
+                 "00",   // leading zero to avoid appearing negative
+                 "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+             ),
+             concat!(
+                 "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                 "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+             ),
+            ),
+            (48,
+             concat!(
+                 "3065",  // SEQUENCE
+                 "0230",  // INTEGER len x30
+                 "12b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7",
+                 "0231",  // INTEGER len x31
+                 "00",    // leading zero
+                 "e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
+                 ),
+             concat!(
+                 "12b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7",
+                 "e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
+              ),
+            ),
+            (32,
+             concat!(
+                 "3044", // SEQUENCE
+                 "021f", // INTEGER len x1f
+                 "2ba8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                 "0221", // INTEGER len x21
+                 "00",   // leading zero to avoid appearing negative
+                 "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+             ),
+             concat!(
+                 "002ba8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                 "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+             ),
+            ),
+        ];
+        for (coord_len, der_sig, cose_sig) in tests {
+            let sig = hex::decode(der_sig).unwrap();
+            let got = ec_der_signature_to_cose(coord_len, &sig).unwrap();
+            assert_eq!(hex::encode(&got), cose_sig, "DER->COSE mismatch for {der_sig}");
+
+            let got = ec_cose_signature_to_der(coord_len, &got).unwrap();
+            assert_eq!(hex::encode(&got), der_sig, "COSE->DER mismatch for {cose_sig}");
+        }
+    }
+
+    #[test]
+    fn test_der_signature_convert_fail() {
+        let tests = [
+            (
+                32,
+                concat!(
+                    "3044", // SEQUENCE **wrong len**
+                    "0220", // INTEGER len x20
+                    "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "0221", // INTEGER len x21
+                    "00",   // leading zero to avoid appearing negative
+                    "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+            (
+                48,
+                concat!(
+                    "3065",  // SEQUENCE
+                    "0231",  // INTEGER len x30  **wrong len**
+                    "12b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7",
+                    "0231",  // INTEGER len x31
+                    "00",    // leading zero
+                    "e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
+                ),
+            ),
+            (
+                32,
+                concat!(
+                    "3044", // SEQUENCE
+                    "021f", // INTEGER len x1f **wrong len**
+                    "002ba8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "0221", // INTEGER len x21
+                    "00",   // leading zero to avoid appearing negative
+                    "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+            (
+                32,
+                concat!(
+                    "3044", // SEQUENCE
+                    "0220", // INTEGER len x20  **unnecessary leading 00**
+                    "002ba8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "0221", // INTEGER len x21
+                    "00",   // leading zero to avoid appearing negative
+                    "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+            (
+                1 + i32::MAX as usize,
+                concat!(
+                    "3045", // SEQUENCE
+                    "0220", // INTEGER len x20
+                    "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "0221", // INTEGER len x21
+                    "00",   // leading zero to avoid appearing negative
+                    "b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+        ];
+        for (coord_len, der_sig) in tests {
+            let sig = hex::decode(der_sig).unwrap();
+            assert!(
+                ec_der_signature_to_cose(coord_len, &sig).is_err(),
+                "expected DER decode error for {der_sig}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cose_signature_convert_fail() {
+        let tests = [
+            (
+                32,  // data too long
+                concat!(
+                    "112ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "11b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+            (
+                32, // data too short
+                concat!(
+                    "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+                    "29f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+                ),
+            ),
+            (
+                48, // data too long
+                concat!(
+                    "b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7",
+                    "e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
+                ),
+            ),
+        ];
+        for (coord_len, cose_sig) in tests {
+            let sig = hex::decode(cose_sig).unwrap();
+            assert!(
+                ec_cose_signature_to_der(coord_len, &sig).is_err(),
+                "expected COSE decode error for {cose_sig}"
+            );
+        }
     }
 }
