@@ -102,9 +102,18 @@ pub trait EcDsa: Send {
     /// unimplemented and instead implement the `sign_data` method in the `Device` trait if the
     /// private signing key is not readily available (i.e. `get_identity` in the `Device` trait
     /// returns `None` for the first element of the returned tuple).
+    ///
+    /// The signature should be encoded in a form suitable for use in COSE, specifically:
+    /// - signatures from NIST curves (P-256, P-384) should be encoded as R | S, with the R and S
+    ///   values being byte strings with length the same as the key size (RFC 8152 section 8.1).
+    ///   Signatures should *not* be enclosed in an ASN.1 DER `Ecdsa-Sig-Value` object.
+    /// - signatures from Edwards curves (Ed25519) should be encoded as raw bytes.
     fn sign(&self, sign_key: &EcSignKey, data: &[u8]) -> Result<Vec<u8>, Error>;
+
     /// Verify the signature over the data using the given EC public key. You can safely assume that
     /// the `Cosekey` of `EcVerifyKey` has been checked for containing the appropriate parameters.
+    ///
+    /// The signature data is present in the form described for `sign` above.
     fn verify_signature(
         &self,
         verify_key: &EcVerifyKey,

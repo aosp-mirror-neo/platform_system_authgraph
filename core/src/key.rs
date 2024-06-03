@@ -20,7 +20,10 @@ use crate::error::Error;
 use crate::traits::{EcDsa, Rng};
 use crate::FallibleAllocExt;
 use crate::{ag_err, ag_verr};
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use authgraph_wire as wire;
 use coset::{
     cbor, cbor::value::Value, iana, AsCborValue, CborOrdering, CborSerializable, CoseError,
@@ -313,9 +316,23 @@ pub struct DiceChainEntry {
     /// A certificate is represented as CoseSign1. The `payload` field of CoseSign1 holds the CBOR
     /// encoded payload that was signed.
     pub signature: CoseSign1,
-    /// The payload signed in the certificate is decoded as `DiceChainEntryPayload` for validation
-    /// purposes.
-    pub payload: DiceChainEntryPayload,
+    /// The payload signed in the certificate is partially decoded as
+    /// `DiceChainEntryPayloadPartiallyDecoded` for validation purposes.
+    pub payload: DiceChainEntryPayloadPartiallyDecoded,
+}
+
+/// Partially decoded payload for each entry in the DICE chain
+#[derive(Default, Clone, PartialEq)]
+pub struct DiceChainEntryPayloadPartiallyDecoded {
+    /// Issuer of the DiceChainEntry. Required as per the CDDL.
+    pub issuer: Option<String>,
+    /// The party whom the certificate is issued to. Required as per the CDDL.
+    pub subject: Option<String>,
+    /// Public signing key of the party whom the certificate is issued to. Required as per the CDDL.
+    pub subject_pub_key: Option<EcVerifyKey>,
+    /// The complete CBOR map containing all the fields (including the fields above) of the
+    /// DiceChainEntryPayload
+    pub full_map: Option<Value>,
 }
 
 /// Payload for each entry in the DICE chain
@@ -338,7 +355,7 @@ pub struct DiceChainEntryPayload {
     /// Configuration hash. Required as per the CDDL.
     pub configuration_hash: Option<Vec<u8>>,
     /// Configuration descriptor. Required as per the CDDL.
-    pub configuration_descriptor: Option<ConfigurationDescriptor>,
+    pub configuration_descriptor: Option<ConfigurationDescriptorOrLegacy>,
     /// Authority hash. Required as per the CDDL.
     pub authority_hash: Option<Vec<u8>>,
     /// Authority descriptor. Optional as per the CDDL.
@@ -364,6 +381,15 @@ pub struct ConfigurationDescriptor {
     pub rkp_vm_marker: bool,
     /// Any custom fields, if present
     pub custom_fields: Vec<(i64, Value)>,
+}
+
+/// Configuration descriptor that allows for non-spec compliant legacy values.
+#[derive(Clone, PartialEq)]
+pub enum ConfigurationDescriptorOrLegacy {
+    /// Configuration descriptor complying with the CDDL schema.
+    Descriptor(ConfigurationDescriptor),
+    /// Raw legacy configuration descriptor (b/261647022).
+    Legacy(Vec<u8>),
 }
 
 /// Component version can be either an integer or a string, as per the CDDL.
@@ -631,7 +657,7 @@ impl CborSerializable for CertChain {}
 impl AsCborValue for DiceChainEntry {
     fn from_cbor_value(value: Value) -> Result<Self, CoseError> {
         let signature = CoseSign1::from_cbor_value(value)?;
-        let payload = DiceChainEntryPayload::from_slice(
+        let payload = DiceChainEntryPayloadPartiallyDecoded::from_slice(
             signature.payload.as_ref().ok_or(CoseError::EncodeFailed)?,
         )?;
         Ok(DiceChainEntry { signature, payload })
@@ -643,6 +669,72 @@ impl AsCborValue for DiceChainEntry {
         // contains the additional `payload` field only for the purpose of validation, therefore, it
         // does not need to be included in the CBOR encoding.
         self.signature.to_cbor_value()
+    }
+}
+
+impl CborSerializable for DiceChainEntryPayloadPartiallyDecoded {}
+
+impl AsCborValue for DiceChainEntryPayloadPartiallyDecoded {
+    fn from_cbor_value(value: Value) -> Result<Self, CoseError> {
+        let payload_map = match value {
+            Value::Map(ref map) => map,
+            _ => {
+                return Err(CoseError::UnexpectedItem("non-map", "map of entries"));
+            }
+        };
+        let mut dice_chain_entry_payload = DiceChainEntryPayloadPartiallyDecoded::default();
+        for (key, val) in payload_map {
+            let key_int: i64 = key
+                .as_integer()
+                .ok_or(CoseError::UnexpectedItem("None", "an Integer"))?
+                .try_into()
+                .map_err(|_| CoseError::UnexpectedItem("error", "an Integer convertible to i64"))?;
+            match (key_int, val) {
+                (ISS, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
+                    None => dice_chain_entry_payload.issuer = Some(issuer.to_string()),
+                    Some(_) => {
+                        return Err(CoseError::UnexpectedItem(
+                            "single entry for issuer",
+                            "repeated entries for issuer",
+                        ));
+                    }
+                },
+                (SUB, Value::Text(subject)) => match dice_chain_entry_payload.subject {
+                    None => dice_chain_entry_payload.subject = Some(subject.to_string()),
+                    Some(_) => {
+                        return Err(CoseError::UnexpectedItem(
+                            "single entry for subject",
+                            "repeated entries for subject",
+                        ));
+                    }
+                },
+                (SUBJECT_PUBLIC_KEY, Value::Bytes(sp_key_bytes)) => {
+                    match dice_chain_entry_payload.subject_pub_key {
+                        None => {
+                            let cose_key = CoseKey::from_slice(sp_key_bytes)?;
+                            let ec_verify_key = EcVerifyKey::from_cose_key(cose_key)?;
+                            dice_chain_entry_payload.subject_pub_key = Some(ec_verify_key);
+                        }
+                        Some(_) => {
+                            return Err(CoseError::UnexpectedItem(
+                                "single entry for subject public key",
+                                "repeated entries for subject public key",
+                            ));
+                        }
+                    }
+                }
+                (_k, _v) => {}
+            }
+        }
+        dice_chain_entry_payload.full_map = Some(value);
+        Ok(dice_chain_entry_payload)
+    }
+
+    fn to_cbor_value(self) -> Result<Value, CoseError> {
+        // This is not implemented because Authgraph protocol retrieves an already encoded DICE
+        // chain via `Device` trait and the first field of `DiceChainEntry` has the encoded payload
+        // that is signed.
+        unimplemented!()
     }
 }
 
@@ -751,8 +843,15 @@ impl AsCborValue for DiceChainEntryPayload {
                 (CONFIG_DESC, Value::Bytes(config_desc)) => {
                     match dice_chain_entry_payload.configuration_descriptor {
                         None => {
-                            dice_chain_entry_payload.configuration_descriptor =
-                                Some(ConfigurationDescriptor::from_slice(&config_desc)?);
+                            let desc = match ConfigurationDescriptor::from_slice(&config_desc) {
+                                Ok(desc) => ConfigurationDescriptorOrLegacy::Descriptor(desc),
+                                Err(_) => {
+                                    // Allow for legacy devices that use a different format
+                                    // (b/261647022).
+                                    ConfigurationDescriptorOrLegacy::Legacy(config_desc)
+                                }
+                            };
+                            dice_chain_entry_payload.configuration_descriptor = Some(desc);
                         }
                         Some(_) => {
                             return Err(CoseError::UnexpectedItem(
@@ -945,4 +1044,59 @@ pub fn check_cose_key_params(
         return Err(ag_verr!(err_code, "invalid curve {curve:?}, expect {want_curve:?}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_open_dice_payload() {
+        // Some legacy devices have an open-DICE format config descriptor (b/261647022) rather than
+        // the format used in the Android RKP HAL.  Ensure that they still parse.
+        let data = hex::decode(concat!(
+            "a8",   // 8-map
+            "01",   // Issuer:
+            "7828", // 40-tstr
+            "32336462613837333030633932323934663836333566323738316464346633366362313934383835",
+            "02",   // Subject:
+            "7828", // 40-tstr
+            "33376165616366396230333465643064376166383665306634653431656163356335383134343966",
+            "3a00474450", // Code Hash(-4670545):
+            "5840",       // 64-bstr
+            "3c9aa93a6766f16f5fbd3dfc7e5059b39cdc8aa0cf546cc878d588a69cfcd654",
+            "2fa509bd6cc14b7160a6bf34545ffdd840f0e91e35b274a7a952b5b0efcff1b0",
+            "3a00474453", // Configuration Descriptor (-4670548):
+            "5840",       // 64-bstr
+            // The RKP HAL expects the following data to match schema:
+            //
+            //     { ? -70002 : tstr, ? -70003 : int / tstr, ? -70004 : null,
+            //       ? -70005 : uint, ? -70006 : null, }
+            //
+            // However, the open-DICE spec had:
+            //     If the configuration input is a hash this field contains the original
+            //     configuration data that was hashed. If it is not a hash, this field contains the
+            //     exact 64-byte configuration input value used to compute CDI values."
+            "e2000000000001508609939b5a4f0f0800000000000000000101000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "3a00474454", // Authority Hash (-4670549):
+            "5840",       // 64-bstr
+            "4d00da66eabbb2b684641a57e96c8e64d76df1e31ea203bbbb9f439372c1a8ec",
+            "aa550000aa550000aa550000aa550000aa550000aa550000aa550000aa550000",
+            "3a00474456", // Mode (-4670551):
+            "4101",       // 1-bstr value 0x01
+            "3a00474457", // Subject Public Key (-4670552):
+            "5871",       // 113-bstr
+            "a601020338220481022002215830694a8fa269c3375b770ef61d06dec5a78595",
+            "2ee96db3602b57c50d8fa67f97e874fbd3f5b42e66ac8ead3f3eb3b130f42258",
+            "301b5574256be9f4770c3325422e53981b1a969387068a51aea68fe98f779be5",
+            "75ecb077a60106852af654377e56d446a6",
+            "3a00474458", // Key Usage (-4670553):
+            "4120"        // 1-bstr value 0x20
+        ))
+        .unwrap();
+
+        assert!(DiceChainEntryPayloadPartiallyDecoded::from_slice(&data).is_ok());
+        assert!(DiceChainEntryPayload::from_slice(&data).is_ok());
+    }
 }
