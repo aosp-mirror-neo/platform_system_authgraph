@@ -309,16 +309,18 @@ pub fn test_ecdsa<E: EcDsa>(ecdsa: &E) {
             sig: "657c1492402ab5ce03e2c3a7f0384d051b9cf3570f1207fc78c1bcc98c281c2bf0cf5b3a289976458a1be6277a5055545253b45b07dcc1abd96c8b989c00f301",
         },
         // Wycheproof: ecdsa_secp256r1_sha256_test.json tcId=3
+        // Signature converted to R | S form
         TestCase {
             key: EcVerifyKey::P256(p256_key),
             msg: "313233343030",
-            sig: "304502202ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18022100b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
+            sig: "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18b329f479a2bbd0a5c384ee1493b1f5186a87139cac5df4087c134b49156847db",
         },
         // Wycheproof: ecdsa_secp384r1_sha384_test.json tcId=3
+        // Signature converted to R | S form
         TestCase {
             key: EcVerifyKey::P384(p384_key),
             msg: "313233343030",
-            sig: "3065023012b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7023100e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
+            sig: "12b30abef6b5476fe6b612ae557c0425661e26b44b1bfe19daf2ca28e3113083ba8e4ae4cc45a0320abd3394f1c548d7e7bf25603e2d07076ff30b7a2abec473da8b11c572b35fc631991d5de62ddca7525aaba89325dfd04fecc47bff426f82",
         },
     ];
 
@@ -1230,4 +1232,14 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
 pub fn test_get_identity<D: Device, E: EcDsa>(ag_device: &D, ecdsa: &E) {
     let (_, identity) = ag_device.get_identity().unwrap();
     identity.validate(ecdsa).unwrap();
+}
+
+/// Test validation of a sample BCC identity.
+pub fn test_example_identity_validate<E: EcDsa>(ecdsa: &E) {
+    let mut hex_data =
+        std::str::from_utf8(include_bytes!("../testdata/sample_identity.hex")).unwrap().to_string();
+    hex_data.retain(|c| !c.is_whitespace());
+    let data = hex::decode(hex_data).unwrap();
+    let identity = Identity::from_slice(&data).expect("identity data did not decode");
+    identity.validate(ecdsa).expect("identity did not validate");
 }
