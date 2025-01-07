@@ -39,7 +39,7 @@ impl<'a> Fragmenter<'a> {
     }
 }
 
-impl<'a> Iterator for Fragmenter<'a> {
+impl Iterator for Fragmenter<'_> {
     type Item = Vec<u8>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.data.is_empty() {
