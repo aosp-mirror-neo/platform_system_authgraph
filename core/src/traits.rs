@@ -143,7 +143,7 @@ pub trait Sha256: Send {
 }
 
 /// Trait methods for generating cryptographically secure random numbers
-pub trait Rng {
+pub trait Rng: Send {
     /// Create a cryptographically secure random bytes
     fn fill_bytes(&self, nonce: &mut [u8]);
     /// Emit a copy of the trait implementation, as a boxed trait object.
