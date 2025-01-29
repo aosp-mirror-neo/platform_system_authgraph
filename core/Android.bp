@@ -57,6 +57,7 @@ rust_test {
     srcs: ["src/lib.rs"],
     host_supported: true,
     rustlibs: [
+        "libauthgraph_core_test",
         "libauthgraph_wire",
         "libcoset",
         "libhex",

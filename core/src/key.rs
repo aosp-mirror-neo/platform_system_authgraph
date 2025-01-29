@@ -66,16 +66,23 @@ const AUTHORITY_HASH: i64 = -4670549;
 const AUTHORITY_DESC: i64 = -4670550;
 const MODE: i64 = -4670551;
 
-const COMPONENT_NAME: i64 = -70002;
-const COMPONENT_VERSION: i64 = -70003;
-const RESETTABLE: i64 = -70004;
-const SECURITY_VERSION: i64 = -70005;
-const RKP_VM_MARKER: i64 = -70006;
+/// Keys of the `ConfigurationDescriptor` map defined in hardware/interfaces/security/rkp/aidl/
+/// android/hardware/security/keymint/generateCertificateRequestV2.cddl
+/// Name of the component which is the owner of the certificate
+pub const COMPONENT_NAME: i64 = -70002;
+/// Version of the component
+pub const COMPONENT_VERSION: i64 = -70003;
+/// Is the component resettable
+pub const RESETTABLE: i64 = -70004;
+/// Security version of the component
+pub const SECURITY_VERSION: i64 = -70005;
+/// Is this component part of a RKP VM boot chain
+pub const RKP_VM_MARKER: i64 = -70006;
 /// Instance hash introduced in the "DICE specification for guest VM"
 /// in packages/modules/Virtualization/dice_for_avf_guest.cddl
 pub const INSTANCE_HASH: i64 = -71003;
-
-const GUEST_OS_COMPONENT_NAME: &str = "vm_entry";
+/// Name of the guest os component in a pVM DICE chain
+pub const GUEST_OS_COMPONENT_NAME: &str = "vm_entry";
 
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
@@ -598,7 +605,9 @@ impl CertChain {
     /// packages/modules/Virtualization/dice_for_avf_guest.cddl. We are specifically looking for the
     /// instance hash included in the DICE certificate that has the component name = "vm_entry",
     /// which is set by the PVMFW. If not present, return None.
-    pub fn extract_instance_identifier(&self) -> Result<Option<InstanceIdentifier>, Error> {
+    pub fn extract_instance_identifier_in_guest_os_entry(
+        &self,
+    ) -> Result<Option<InstanceIdentifier>, Error> {
         // Access the configuration descriptor by decoding the `full_map` in a DiceChainEntry
         // as `DiceChainEntryPayload` and check if instance identifier is present
         if let Some(dice_cert_chain) = &self.dice_cert_chain {
@@ -1126,6 +1135,15 @@ pub fn check_cose_key_params(
 mod tests {
     use super::*;
     use alloc::vec;
+    use authgraph_core_test::create_dice_cert_chain_for_guest_os;
+
+    const SAMPLE_INSTANCE_HASH: [u8; 64] = [
+        0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4,
+        0x2a, 0x7d, 0x7e, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x55, 0x8a,
+        0xe9, 0x90, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x5b, 0x3f, 0xc9,
+        0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a, 0x7d, 0x7e,
+        0xf5, 0x8e, 0xf5, 0x8e,
+    ];
 
     #[test]
     fn test_legacy_open_dice_payload() {
@@ -1177,7 +1195,8 @@ mod tests {
         assert!(DiceChainEntryPayload::from_slice(&data).is_ok());
     }
 
-    /// Test instance hash extraction API method with test data that has an instance id (hash)
+    /// Test instance hash extraction API method with test data (from a device) that has
+    /// an instance hash
     #[test]
     fn test_instance_hash_extraction() {
         // Read the DICE chain bytes from the file
@@ -1185,21 +1204,22 @@ mod tests {
         // Create an explicit key DICE chain out of it
         let explicit_key_dice_chain = CertChain::from_non_explicit_key_cert_chain(dice_chain_bytes)
             .expect("error converting DICE chain to an explicit key DICE chain");
-        // Extract the instance id
-        let instance_id = explicit_key_dice_chain
-            .extract_instance_identifier()
+        // Extract the instance hash
+        let instance_hash = explicit_key_dice_chain
+            .extract_instance_identifier_in_guest_os_entry()
             .expect("error in extracting the instance id")
             .expect("no instance id found");
-        let expected_instance_id = vec![
+        let expected_instance_hash = vec![
             68, 32, 41, 225, 228, 67, 229, 107, 207, 212, 74, 74, 191, 25, 211, 133, 57, 166, 35,
             146, 86, 89, 182, 52, 183, 255, 215, 204, 5, 183, 254, 79, 129, 240, 197, 252, 238, 69,
             124, 44, 164, 214, 205, 87, 194, 226, 124, 249, 158, 219, 188, 127, 55, 143, 232, 142,
             119, 174, 202, 160, 234, 179, 205, 30,
         ];
-        assert_eq!(instance_id, expected_instance_id);
+        assert_eq!(instance_hash, expected_instance_hash);
     }
 
-    /// Test instance hash extraction API method with test data that does not have an instance id
+    /// Test instance hash extraction API method with test data (from a device) that does not
+    /// have an instance hash
     #[test]
     fn test_instance_hash_extraction_negative() {
         let mut hex_data =
@@ -1209,11 +1229,43 @@ mod tests {
         hex_data.retain(|c| !c.is_whitespace());
         let data = hex::decode(hex_data).unwrap();
         let identity = Identity::from_slice(&data).expect("identity data did not decode");
-        // Extract the instance id
-        let instance_id = identity
+        // Extract the instance hash
+        let instance_hash = identity
             .cert_chain
-            .extract_instance_identifier()
+            .extract_instance_identifier_in_guest_os_entry()
             .expect("error in extracting the instance id");
-        assert_eq!(instance_id, None);
+        assert_eq!(instance_hash, None);
+    }
+
+    /// Test instance hash extraction with a programmatically created DICE cert chain that has
+    /// instance hash
+    #[test]
+    fn test_instance_hash_extraction_with_code_generated_dice_chain() {
+        // Read the DICE chain bytes from the file
+        let (_, _, dice_chain_bytes) =
+            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH));
+        let dice_cert_chain =
+            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
+        // Extract the instance hash
+        let instance_hash = dice_cert_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id")
+            .expect("no instance id found");
+        assert_eq!(instance_hash, SAMPLE_INSTANCE_HASH);
+    }
+
+    /// Test instance hash extraction with a programmatically created DICE cert chain that does not
+    /// has instance hash
+    #[test]
+    fn test_instance_hash_extraction_with_code_generated_dice_chain_negative() {
+        // Read the DICE chain bytes from the file
+        let (_, _, dice_chain_bytes) = create_dice_cert_chain_for_guest_os(None);
+        let dice_cert_chain =
+            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
+        // Extract the instance id
+        let instance_hash = dice_cert_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id");
+        assert_eq!(instance_hash, None);
     }
 }
