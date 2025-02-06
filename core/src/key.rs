@@ -66,11 +66,23 @@ const AUTHORITY_HASH: i64 = -4670549;
 const AUTHORITY_DESC: i64 = -4670550;
 const MODE: i64 = -4670551;
 
-const COMPONENT_NAME: i64 = -70002;
-const COMPONENT_VERSION: i64 = -70003;
-const RESETTABLE: i64 = -70004;
-const SECURITY_VERSION: i64 = -70005;
-const RKP_VM_MARKER: i64 = -70006;
+/// Keys of the `ConfigurationDescriptor` map defined in hardware/interfaces/security/rkp/aidl/
+/// android/hardware/security/keymint/generateCertificateRequestV2.cddl
+/// Name of the component which is the owner of the certificate
+pub const COMPONENT_NAME: i64 = -70002;
+/// Version of the component
+pub const COMPONENT_VERSION: i64 = -70003;
+/// Is the component resettable
+pub const RESETTABLE: i64 = -70004;
+/// Security version of the component
+pub const SECURITY_VERSION: i64 = -70005;
+/// Is this component part of a RKP VM boot chain
+pub const RKP_VM_MARKER: i64 = -70006;
+/// Instance hash introduced in the "DICE specification for guest VM"
+/// in packages/modules/Virtualization/dice_for_avf_guest.cddl
+pub const INSTANCE_HASH: i64 = -71003;
+/// Name of the guest os component in a pVM DICE chain
+pub const GUEST_OS_COMPONENT_NAME: &str = "vm_entry";
 
 /// AES key of 256 bits
 #[derive(Clone, ZeroizeOnDrop)]
@@ -366,6 +378,9 @@ pub struct DiceChainEntryPayload {
     pub custom_fields: Vec<(i64, Value)>,
 }
 
+/// Type alias for an instance identifier found in a DICE certificate for a pVM instance
+pub type InstanceIdentifier = Vec<u8>;
+
 /// Configuration descriptor in `DiceChainEntryPayload`. All the fields are optional
 #[derive(Default, Clone, PartialEq)]
 pub struct ConfigurationDescriptor {
@@ -584,6 +599,76 @@ impl CertChain {
                 Ok(parent_pub_sign_key.clone())
             }
         }
+    }
+
+    /// Extract the instance identifier (a.k.a. instance hash) from a pVM DICE chain as per
+    /// packages/modules/Virtualization/dice_for_avf_guest.cddl. We are specifically looking for the
+    /// instance hash included in the DICE certificate that has the component name = "vm_entry",
+    /// which is set by the PVMFW. If not present, return None.
+    pub fn extract_instance_identifier_in_guest_os_entry(
+        &self,
+    ) -> Result<Option<InstanceIdentifier>, Error> {
+        // Access the configuration descriptor by decoding the `full_map` in a DiceChainEntry
+        // as `DiceChainEntryPayload` and check if instance identifier is present
+        if let Some(dice_cert_chain) = &self.dice_cert_chain {
+            for dice_cert in dice_cert_chain.iter().rev() {
+                if let Some(v) = &dice_cert.payload.full_map {
+                    let dice_chain_entry_payload =
+                        DiceChainEntryPayload::from_cbor_value(v.clone())?;
+                    if let Some(ConfigurationDescriptorOrLegacy::Descriptor(config_desc)) =
+                        dice_chain_entry_payload.configuration_descriptor
+                    {
+                        if config_desc
+                            .component_name
+                            .map_or(false, |comp_name| comp_name == GUEST_OS_COMPONENT_NAME)
+                        {
+                            let instance_hash_tuple =
+                                config_desc.custom_fields.iter().find(|v| v.0 == INSTANCE_HASH);
+                            if let Some((_, Value::Bytes(instance_hash))) =
+                                instance_hash_tuple.cloned()
+                            {
+                                return Ok(Some(instance_hash));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Convert a DICE chain to explicit key DICE chain format, if it is not already in this format.
+    /// This method is used to convert a DICE chain adhering to the CDDL defined in
+    /// hardware/interfaces/security/rkp/aidl/android/hardware/security/keymint/
+    /// generateCertificateRequestV2.cddl to a DICE chain adhering to the CDDL defined in
+    /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/
+    /// ExplicitKeyDiceCertChain.cddl
+    pub fn from_non_explicit_key_cert_chain(dice_chain_bytes: &[u8]) -> Result<Self, Error> {
+        let value = Value::from_slice(dice_chain_bytes)?;
+        let dice_cert_chain_array = value
+            .into_array()
+            .map_err(|_| ag_err!(InvalidCertChain, "cert chain is not a cbor array"))?;
+        // Check if the dice_chain is already in explicit key format
+        if matches!(
+            &&dice_cert_chain_array[..],
+            [Value::Integer(_version), Value::Bytes(_public_key), ..]
+        ) {
+            return Ok(CertChain::from_slice(dice_chain_bytes)?);
+        }
+        let mut res: Vec<Value> = Vec::with_capacity(dice_cert_chain_array.len() + 1);
+        let mut it = dice_cert_chain_array.into_iter();
+        res.push(Value::from(EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION));
+        let root_key =
+            it.next().ok_or(ag_err!(InvalidCertChain, "cert chain is an empty array"))?;
+
+        // Canonicalize the root public key as per Core Deterministic Encoding Requirements
+        let mut root_key = CoseKey::from_cbor_value(root_key)?;
+        root_key.canonicalize(CborOrdering::Lexicographic);
+        // Converts to .bstr .cbor COSE_KEY
+        let root_key = root_key.to_vec()?;
+        res.push(Value::Bytes(root_key));
+        res.extend(it);
+        Ok(CertChain::from_cbor_value(Value::Array(res))?)
     }
 }
 
@@ -1049,6 +1134,16 @@ pub fn check_cose_key_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use authgraph_core_test::create_dice_cert_chain_for_guest_os;
+
+    const SAMPLE_INSTANCE_HASH: [u8; 64] = [
+        0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4,
+        0x2a, 0x7d, 0x7e, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x55, 0x8a,
+        0xe9, 0x90, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x5b, 0x3f, 0xc9,
+        0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a, 0x7d, 0x7e,
+        0xf5, 0x8e, 0xf5, 0x8e,
+    ];
 
     #[test]
     fn test_legacy_open_dice_payload() {
@@ -1098,5 +1193,79 @@ mod tests {
 
         assert!(DiceChainEntryPayloadPartiallyDecoded::from_slice(&data).is_ok());
         assert!(DiceChainEntryPayload::from_slice(&data).is_ok());
+    }
+
+    /// Test instance hash extraction API method with test data (from a device) that has
+    /// an instance hash
+    #[test]
+    fn test_instance_hash_extraction() {
+        // Read the DICE chain bytes from the file
+        let dice_chain_bytes: &[u8] = include_bytes!("../testdata/bcc");
+        // Create an explicit key DICE chain out of it
+        let explicit_key_dice_chain = CertChain::from_non_explicit_key_cert_chain(dice_chain_bytes)
+            .expect("error converting DICE chain to an explicit key DICE chain");
+        // Extract the instance hash
+        let instance_hash = explicit_key_dice_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id")
+            .expect("no instance id found");
+        let expected_instance_hash = vec![
+            68, 32, 41, 225, 228, 67, 229, 107, 207, 212, 74, 74, 191, 25, 211, 133, 57, 166, 35,
+            146, 86, 89, 182, 52, 183, 255, 215, 204, 5, 183, 254, 79, 129, 240, 197, 252, 238, 69,
+            124, 44, 164, 214, 205, 87, 194, 226, 124, 249, 158, 219, 188, 127, 55, 143, 232, 142,
+            119, 174, 202, 160, 234, 179, 205, 30,
+        ];
+        assert_eq!(instance_hash, expected_instance_hash);
+    }
+
+    /// Test instance hash extraction API method with test data (from a device) that does not
+    /// have an instance hash
+    #[test]
+    fn test_instance_hash_extraction_negative() {
+        let mut hex_data =
+            std::str::from_utf8(include_bytes!("../../tests/testdata/sample_identity.hex"))
+                .unwrap()
+                .to_string();
+        hex_data.retain(|c| !c.is_whitespace());
+        let data = hex::decode(hex_data).unwrap();
+        let identity = Identity::from_slice(&data).expect("identity data did not decode");
+        // Extract the instance hash
+        let instance_hash = identity
+            .cert_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id");
+        assert_eq!(instance_hash, None);
+    }
+
+    /// Test instance hash extraction with a programmatically created DICE cert chain that has
+    /// instance hash
+    #[test]
+    fn test_instance_hash_extraction_with_code_generated_dice_chain() {
+        // Read the DICE chain bytes from the file
+        let (_, _, dice_chain_bytes) =
+            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH));
+        let dice_cert_chain =
+            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
+        // Extract the instance hash
+        let instance_hash = dice_cert_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id")
+            .expect("no instance id found");
+        assert_eq!(instance_hash, SAMPLE_INSTANCE_HASH);
+    }
+
+    /// Test instance hash extraction with a programmatically created DICE cert chain that does not
+    /// has instance hash
+    #[test]
+    fn test_instance_hash_extraction_with_code_generated_dice_chain_negative() {
+        // Read the DICE chain bytes from the file
+        let (_, _, dice_chain_bytes) = create_dice_cert_chain_for_guest_os(None);
+        let dice_cert_chain =
+            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
+        // Extract the instance id
+        let instance_hash = dice_cert_chain
+            .extract_instance_identifier_in_guest_os_entry()
+            .expect("error in extracting the instance id");
+        assert_eq!(instance_hash, None);
     }
 }
