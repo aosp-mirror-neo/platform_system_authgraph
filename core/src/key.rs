@@ -22,6 +22,7 @@ use crate::FallibleAllocExt;
 use crate::{ag_err, ag_verr};
 use alloc::{
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use authgraph_wire as wire;
@@ -53,18 +54,30 @@ pub const IDENTITY_VERSION: i32 = 1;
 pub const SHA_256_LEN: usize = 32;
 
 // Following constants represent the keys of the (key, value) pairs in a Dice certificate
-const ISS: i64 = 1;
-const SUB: i64 = 2;
-const PROFILE_NAME: i64 = -4670554;
-const SUBJECT_PUBLIC_KEY: i64 = -4670552;
-const KEY_USAGE: i64 = -4670553;
-const CODE_HASH: i64 = -4670545;
-const CODE_DESC: i64 = -4670546;
-const CONFIG_HASH: i64 = -4670547;
-const CONFIG_DESC: i64 = -4670548;
-const AUTHORITY_HASH: i64 = -4670549;
-const AUTHORITY_DESC: i64 = -4670550;
-const MODE: i64 = -4670551;
+/// Issuer
+pub const ISSUER: i64 = 1;
+/// Subject
+pub const SUBJECT: i64 = 2;
+/// Profile Name
+pub const PROFILE_NAME: i64 = -4670554;
+/// Subject Public Key
+pub const SUBJECT_PUBLIC_KEY: i64 = -4670552;
+/// Key Usage
+pub const KEY_USAGE: i64 = -4670553;
+/// Code Hash
+pub const CODE_HASH: i64 = -4670545;
+/// Code Descriptor
+pub const CODE_DESC: i64 = -4670546;
+/// Configuration Hash
+pub const CONFIG_HASH: i64 = -4670547;
+/// Configuration Descriptor
+pub const CONFIG_DESC: i64 = -4670548;
+/// Authority Hash
+pub const AUTHORITY_HASH: i64 = -4670549;
+/// Authority Descriptor
+pub const AUTHORITY_DESC: i64 = -4670550;
+/// Mode
+pub const MODE: i64 = -4670551;
 
 /// Keys of the `ConfigurationDescriptor` map defined in hardware/interfaces/security/rkp/aidl/
 /// android/hardware/security/keymint/generateCertificateRequestV2.cddl
@@ -181,7 +194,7 @@ pub enum EcSignKey {
 }
 
 /// Variants of EC public key used to verify signature
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EcVerifyKey {
     /// On curve Ed25519
     Ed25519(CoseKey),
@@ -311,7 +324,7 @@ pub struct Identity {
 /// Certificate chain containing the public signing key. The CDDL is listed in
 /// hardware/interfaces/security/authgraph/aidl/android/hardware/security/
 /// authgraph/ExplicitKeyDiceCertChain.cddl
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CertChain {
     /// Version of the cddl
     pub version: i32,
@@ -323,7 +336,7 @@ pub struct CertChain {
 }
 
 /// An entry in the certificate chain (i.e. a certificate).
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DiceChainEntry {
     /// A certificate is represented as CoseSign1. The `payload` field of CoseSign1 holds the CBOR
     /// encoded payload that was signed.
@@ -334,7 +347,7 @@ pub struct DiceChainEntry {
 }
 
 /// Partially decoded payload for each entry in the DICE chain
-#[derive(Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DiceChainEntryPayloadPartiallyDecoded {
     /// Issuer of the DiceChainEntry. Required as per the CDDL.
     pub issuer: Option<String>,
@@ -348,7 +361,7 @@ pub struct DiceChainEntryPayloadPartiallyDecoded {
 }
 
 /// Payload for each entry in the DICE chain
-#[derive(Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DiceChainEntryPayload {
     /// Issuer of the DiceChainEntry. Required as per the CDDL.
     pub issuer: Option<String>,
@@ -382,7 +395,7 @@ pub struct DiceChainEntryPayload {
 pub type InstanceIdentifier = Vec<u8>;
 
 /// Configuration descriptor in `DiceChainEntryPayload`. All the fields are optional
-#[derive(Default, Clone, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConfigurationDescriptor {
     /// Component name
     pub component_name: Option<String>,
@@ -399,7 +412,7 @@ pub struct ConfigurationDescriptor {
 }
 
 /// Configuration descriptor that allows for non-spec compliant legacy values.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ConfigurationDescriptorOrLegacy {
     /// Configuration descriptor complying with the CDDL schema.
     Descriptor(ConfigurationDescriptor),
@@ -408,7 +421,7 @@ pub enum ConfigurationDescriptorOrLegacy {
 }
 
 /// Component version can be either an integer or a string, as per the CDDL.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ComponentVersion {
     /// Version represented as an integer
     IntVersion(u32),
@@ -419,7 +432,7 @@ pub enum ComponentVersion {
 /// Identity verification policy specifying how to validate the certificate chain. The CDDL is
 /// listed in hardware/interfaces/security/authgraph/aidl/android/hardware/security/authgraph/
 /// DicePolicy.cddl
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
 pub struct Policy(pub Vec<u8>);
 
 /// The output of identity verification.
@@ -670,6 +683,44 @@ impl CertChain {
         res.extend(it);
         Ok(CertChain::from_cbor_value(Value::Array(res))?)
     }
+
+    /// Get a copy of this DICE certificate chain extended with the given certificate.
+    pub fn extend_with(&self, cert: &DiceChainEntry, ecdsa: &dyn EcDsa) -> Result<Self, Error> {
+        let mut dice_chain_copy = self.clone();
+        let mut parent_pub_key: EcVerifyKey = dice_chain_copy.root_key.clone();
+        if let Some(cert_chain) = &dice_chain_copy.dice_cert_chain {
+            if let Some(current_leaf_cert) = cert_chain.last() {
+                parent_pub_key = current_leaf_cert
+                    .payload
+                    .subject_pub_key
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| ag_err!(InternalError, "subject public key is missing"))?;
+            }
+        };
+        parent_pub_key.validate_cose_key_params()?;
+        cert.signature
+            .verify_signature(&[], |sig, data| ecdsa.verify_signature(&parent_pub_key, data, sig))
+            .map_err(|_e| {
+                ag_err!(InvalidSignature, "failed to verify signature on the leaf cert")
+            })?;
+        if let Some(ref mut cert_chain) = dice_chain_copy.dice_cert_chain {
+            cert_chain.push(cert.clone());
+        } else {
+            dice_chain_copy.dice_cert_chain = Some(vec![cert.clone()]);
+        }
+        Ok(dice_chain_copy)
+    }
+
+    /// Match the leaf of the cert chain with the given certificate
+    pub fn is_current_leaf(&self, leaf: &DiceChainEntry) -> bool {
+        if let Some(cert_chain) = &self.dice_cert_chain {
+            if let Some(leaf_cert) = cert_chain.last() {
+                return leaf == leaf_cert;
+            }
+        }
+        false
+    }
 }
 
 impl AsCborValue for CertChain {
@@ -775,7 +826,7 @@ impl AsCborValue for DiceChainEntryPayloadPartiallyDecoded {
                 .try_into()
                 .map_err(|_| CoseError::UnexpectedItem("error", "an Integer convertible to i64"))?;
             match (key_int, val) {
-                (ISS, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
+                (ISSUER, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
                     None => dice_chain_entry_payload.issuer = Some(issuer.to_string()),
                     Some(_) => {
                         return Err(CoseError::UnexpectedItem(
@@ -784,7 +835,7 @@ impl AsCborValue for DiceChainEntryPayloadPartiallyDecoded {
                         ));
                     }
                 },
-                (SUB, Value::Text(subject)) => match dice_chain_entry_payload.subject {
+                (SUBJECT, Value::Text(subject)) => match dice_chain_entry_payload.subject {
                     None => dice_chain_entry_payload.subject = Some(subject.to_string()),
                     Some(_) => {
                         return Err(CoseError::UnexpectedItem(
@@ -841,7 +892,7 @@ impl AsCborValue for DiceChainEntryPayload {
                 .try_into()
                 .map_err(|_| CoseError::UnexpectedItem("error", "an Integer convertible to i64"))?;
             match (key_int, val) {
-                (ISS, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
+                (ISSUER, Value::Text(issuer)) => match dice_chain_entry_payload.issuer {
                     None => dice_chain_entry_payload.issuer = Some(issuer),
                     Some(_) => {
                         return Err(CoseError::UnexpectedItem(
@@ -850,7 +901,7 @@ impl AsCborValue for DiceChainEntryPayload {
                         ));
                     }
                 },
-                (SUB, Value::Text(subject)) => match dice_chain_entry_payload.subject {
+                (SUBJECT, Value::Text(subject)) => match dice_chain_entry_payload.subject {
                     None => dice_chain_entry_payload.subject = Some(subject),
                     Some(_) => {
                         return Err(CoseError::UnexpectedItem(
@@ -1129,143 +1180,4 @@ pub fn check_cose_key_params(
         return Err(ag_verr!(err_code, "invalid curve {curve:?}, expect {want_curve:?}"));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-    use authgraph_core_test::create_dice_cert_chain_for_guest_os;
-
-    const SAMPLE_INSTANCE_HASH: [u8; 64] = [
-        0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4,
-        0x2a, 0x7d, 0x7e, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x55, 0x8a,
-        0xe9, 0x90, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x5b, 0x3f, 0xc9,
-        0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a, 0x7d, 0x7e,
-        0xf5, 0x8e, 0xf5, 0x8e,
-    ];
-
-    #[test]
-    fn test_legacy_open_dice_payload() {
-        // Some legacy devices have an open-DICE format config descriptor (b/261647022) rather than
-        // the format used in the Android RKP HAL.  Ensure that they still parse.
-        let data = hex::decode(concat!(
-            "a8",   // 8-map
-            "01",   // Issuer:
-            "7828", // 40-tstr
-            "32336462613837333030633932323934663836333566323738316464346633366362313934383835",
-            "02",   // Subject:
-            "7828", // 40-tstr
-            "33376165616366396230333465643064376166383665306634653431656163356335383134343966",
-            "3a00474450", // Code Hash(-4670545):
-            "5840",       // 64-bstr
-            "3c9aa93a6766f16f5fbd3dfc7e5059b39cdc8aa0cf546cc878d588a69cfcd654",
-            "2fa509bd6cc14b7160a6bf34545ffdd840f0e91e35b274a7a952b5b0efcff1b0",
-            "3a00474453", // Configuration Descriptor (-4670548):
-            "5840",       // 64-bstr
-            // The RKP HAL expects the following data to match schema:
-            //
-            //     { ? -70002 : tstr, ? -70003 : int / tstr, ? -70004 : null,
-            //       ? -70005 : uint, ? -70006 : null, }
-            //
-            // However, the open-DICE spec had:
-            //     If the configuration input is a hash this field contains the original
-            //     configuration data that was hashed. If it is not a hash, this field contains the
-            //     exact 64-byte configuration input value used to compute CDI values."
-            "e2000000000001508609939b5a4f0f0800000000000000000101000000000000",
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "3a00474454", // Authority Hash (-4670549):
-            "5840",       // 64-bstr
-            "4d00da66eabbb2b684641a57e96c8e64d76df1e31ea203bbbb9f439372c1a8ec",
-            "aa550000aa550000aa550000aa550000aa550000aa550000aa550000aa550000",
-            "3a00474456", // Mode (-4670551):
-            "4101",       // 1-bstr value 0x01
-            "3a00474457", // Subject Public Key (-4670552):
-            "5871",       // 113-bstr
-            "a601020338220481022002215830694a8fa269c3375b770ef61d06dec5a78595",
-            "2ee96db3602b57c50d8fa67f97e874fbd3f5b42e66ac8ead3f3eb3b130f42258",
-            "301b5574256be9f4770c3325422e53981b1a969387068a51aea68fe98f779be5",
-            "75ecb077a60106852af654377e56d446a6",
-            "3a00474458", // Key Usage (-4670553):
-            "4120"        // 1-bstr value 0x20
-        ))
-        .unwrap();
-
-        assert!(DiceChainEntryPayloadPartiallyDecoded::from_slice(&data).is_ok());
-        assert!(DiceChainEntryPayload::from_slice(&data).is_ok());
-    }
-
-    /// Test instance hash extraction API method with test data (from a device) that has
-    /// an instance hash
-    #[test]
-    fn test_instance_hash_extraction() {
-        // Read the DICE chain bytes from the file
-        let dice_chain_bytes: &[u8] = include_bytes!("../testdata/bcc");
-        // Create an explicit key DICE chain out of it
-        let explicit_key_dice_chain = CertChain::from_non_explicit_key_cert_chain(dice_chain_bytes)
-            .expect("error converting DICE chain to an explicit key DICE chain");
-        // Extract the instance hash
-        let instance_hash = explicit_key_dice_chain
-            .extract_instance_identifier_in_guest_os_entry()
-            .expect("error in extracting the instance id")
-            .expect("no instance id found");
-        let expected_instance_hash = vec![
-            68, 32, 41, 225, 228, 67, 229, 107, 207, 212, 74, 74, 191, 25, 211, 133, 57, 166, 35,
-            146, 86, 89, 182, 52, 183, 255, 215, 204, 5, 183, 254, 79, 129, 240, 197, 252, 238, 69,
-            124, 44, 164, 214, 205, 87, 194, 226, 124, 249, 158, 219, 188, 127, 55, 143, 232, 142,
-            119, 174, 202, 160, 234, 179, 205, 30,
-        ];
-        assert_eq!(instance_hash, expected_instance_hash);
-    }
-
-    /// Test instance hash extraction API method with test data (from a device) that does not
-    /// have an instance hash
-    #[test]
-    fn test_instance_hash_extraction_negative() {
-        let mut hex_data =
-            std::str::from_utf8(include_bytes!("../../tests/testdata/sample_identity.hex"))
-                .unwrap()
-                .to_string();
-        hex_data.retain(|c| !c.is_whitespace());
-        let data = hex::decode(hex_data).unwrap();
-        let identity = Identity::from_slice(&data).expect("identity data did not decode");
-        // Extract the instance hash
-        let instance_hash = identity
-            .cert_chain
-            .extract_instance_identifier_in_guest_os_entry()
-            .expect("error in extracting the instance id");
-        assert_eq!(instance_hash, None);
-    }
-
-    /// Test instance hash extraction with a programmatically created DICE cert chain that has
-    /// instance hash
-    #[test]
-    fn test_instance_hash_extraction_with_code_generated_dice_chain() {
-        // Read the DICE chain bytes from the file
-        let (_, _, dice_chain_bytes) =
-            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH));
-        let dice_cert_chain =
-            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
-        // Extract the instance hash
-        let instance_hash = dice_cert_chain
-            .extract_instance_identifier_in_guest_os_entry()
-            .expect("error in extracting the instance id")
-            .expect("no instance id found");
-        assert_eq!(instance_hash, SAMPLE_INSTANCE_HASH);
-    }
-
-    /// Test instance hash extraction with a programmatically created DICE cert chain that does not
-    /// has instance hash
-    #[test]
-    fn test_instance_hash_extraction_with_code_generated_dice_chain_negative() {
-        // Read the DICE chain bytes from the file
-        let (_, _, dice_chain_bytes) = create_dice_cert_chain_for_guest_os(None);
-        let dice_cert_chain =
-            CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
-        // Extract the instance id
-        let instance_hash = dice_cert_chain
-            .extract_instance_identifier_in_guest_os_entry()
-            .expect("error in extracting the instance id");
-        assert_eq!(instance_hash, None);
-    }
 }
