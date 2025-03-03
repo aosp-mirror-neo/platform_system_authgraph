@@ -5,7 +5,7 @@ use authgraph_core::key::{
     AesKey, EcSignKey, EcVerifyKey, EcdhSecret, HmacKey, Identity, Key, Nonce12, PseudoRandKey,
     COMPONENT_NAME, COMPONENT_VERSION, CURVE25519_PRIV_KEY_LEN,
     EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION, GUEST_OS_COMPONENT_NAME, IDENTITY_VERSION, INSTANCE_HASH,
-    RESETTABLE,
+    RESETTABLE, SECURITY_VERSION,
 };
 use authgraph_core::keyexchange;
 use authgraph_core::traits::{
@@ -25,6 +25,14 @@ use std::ffi::CString;
 pub const UDS: [u8; diced_open_dice::CDI_SIZE] = [
     0x1d, 0xa5, 0xea, 0x90, 0x47, 0xfc, 0xb5, 0xf6, 0x47, 0x12, 0xd3, 0x65, 0x9c, 0xf2, 0x00, 0xe0,
     0x06, 0xf7, 0xe8, 0x9e, 0x2f, 0xd0, 0x94, 0x7f, 0xc9, 0x9a, 0x9d, 0x40, 0xf7, 0xce, 0x13, 0x21,
+];
+
+/// Sample value for instance hash
+pub const SAMPLE_INSTANCE_HASH: [u8; 64] = [
+    0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95, 0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a,
+    0x7d, 0x7e, 0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x55, 0x8a, 0xe9, 0x90,
+    0xf5, 0x8e, 0xd6, 0x4d, 0x84, 0x25, 0x1a, 0x51, 0x27, 0x9d, 0x5b, 0x3f, 0xc9, 0x6b, 0xe3, 0x95,
+    0x59, 0x40, 0x21, 0x09, 0x9d, 0xf3, 0xcd, 0xc7, 0xa4, 0x2a, 0x7d, 0x7e, 0xf5, 0x8e, 0xf5, 0x8e,
 ];
 
 /// Test basic [`Rng`] functionality.
@@ -1251,6 +1259,7 @@ pub fn test_example_identity_validate<E: EcDsa>(ecdsa: &E) {
 /// pvm DICE chain. Returns the leaf private signing key, leaf CDI values and the sample DICE chain.
 pub fn create_dice_cert_chain_for_guest_os(
     instance_hash_for_vm_entry: Option<[u8; 64]>,
+    security_version: u64,
 ) -> (EcSignKey, diced_open_dice::CdiValues, Vec<u8>) {
     let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
     let (root_pub_key, _pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
@@ -1297,6 +1306,7 @@ pub fn create_dice_cert_chain_for_guest_os(
         component_name: Some(&comp_name_1),
         component_version: Some(1),
         resettable: true,
+        security_version: Some(security_version),
         ..Default::default()
     };
     let config_descriptor_1 = diced_open_dice::retry_bcc_format_config_descriptor(&config_values_1)
@@ -1391,6 +1401,7 @@ pub fn create_dice_cert_chain_for_guest_os(
         (Value::Integer(COMPONENT_NAME.into()), Value::Text("Protected VM firmware".to_string())),
         (Value::Integer(COMPONENT_VERSION.into()), Value::Integer(12.into())),
         (Value::Integer(RESETTABLE.into()), Value::Null),
+        (Value::Integer(SECURITY_VERSION.into()), Value::Integer(security_version.into())),
         // Add an arbitrary instance hash element to the config descriptor of PVMFW
         (Value::Integer(INSTANCE_HASH.into()), Value::Bytes(INSTANCE_HASH_PVMFW.to_vec())),
     ];
@@ -1438,6 +1449,7 @@ pub fn create_dice_cert_chain_for_guest_os(
         (Value::Integer(COMPONENT_NAME.into()), Value::Text(GUEST_OS_COMPONENT_NAME.to_string())),
         (Value::Integer(COMPONENT_VERSION.into()), Value::Integer(12.into())),
         (Value::Integer(RESETTABLE.into()), Value::Null),
+        (Value::Integer(SECURITY_VERSION.into()), Value::Integer(security_version.into())),
     ];
     if let Some(instance_hash) = instance_hash_for_vm_entry {
         config_descriptor_4
@@ -1531,4 +1543,36 @@ pub fn create_dice_cert_chain_for_guest_os(
         cdi_values_5,
         cert_chain.to_vec().expect("error in encoding the cert chain to bytes"),
     )
+}
+
+/// Helper function for testing which derives child DICE artifacts and creates a certificate
+pub fn create_dice_leaf_cert(
+    parent_cdi_values: diced_open_dice::CdiValues,
+    component_name: &str,
+    security_version: u64,
+) -> Vec<u8> {
+    let comp_name = CString::new(component_name).expect("CString::new failed");
+    let config_values = diced_open_dice::DiceConfigValues {
+        component_name: Some(&comp_name),
+        component_version: Some(1),
+        resettable: true,
+        security_version: Some(security_version),
+        ..Default::default()
+    };
+    let config_descriptor = diced_open_dice::retry_bcc_format_config_descriptor(&config_values)
+        .expect("failed to format config descriptor");
+    let input_values = diced_open_dice::InputValues::new(
+        [0u8; diced_open_dice::HASH_SIZE],
+        diced_open_dice::Config::Descriptor(config_descriptor.as_slice()),
+        [0u8; diced_open_dice::HASH_SIZE],
+        diced_open_dice::DiceMode::kDiceModeDebug,
+        [0u8; diced_open_dice::HASH_SIZE],
+    );
+    let (_, leaf_cert) = diced_open_dice::retry_dice_main_flow(
+        &parent_cdi_values.cdi_attest,
+        &parent_cdi_values.cdi_seal,
+        &input_values,
+    )
+    .expect("Failed to run first main flow");
+    leaf_cert
 }
