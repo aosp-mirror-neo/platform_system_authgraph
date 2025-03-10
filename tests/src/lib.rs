@@ -19,6 +19,7 @@ use coset::{
     Algorithm, CborSerializable, CoseKey, CoseKeyBuilder, CoseSign1Builder, HeaderBuilder,
     KeyOperation, KeyType, Label,
 };
+pub use diced_open_dice::CdiValues;
 use std::ffi::CString;
 
 /// UDS used to create the DICE chains in this test-util library.
@@ -1260,7 +1261,7 @@ pub fn test_example_identity_validate<E: EcDsa>(ecdsa: &E) {
 pub fn create_dice_cert_chain_for_guest_os(
     instance_hash_for_vm_entry: Option<[u8; 64]>,
     security_version: u64,
-) -> (EcSignKey, diced_open_dice::CdiValues, Vec<u8>) {
+) -> (EcSignKey, CdiValues, Vec<u8>) {
     let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
     let (root_pub_key, _pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
         .expect("failed to create key pair from seed.");
@@ -1547,7 +1548,7 @@ pub fn create_dice_cert_chain_for_guest_os(
 
 /// Helper function for testing which derives child DICE artifacts and creates a certificate
 pub fn create_dice_leaf_cert(
-    parent_cdi_values: diced_open_dice::CdiValues,
+    parent_cdi_values: CdiValues,
     component_name: &str,
     security_version: u64,
 ) -> Vec<u8> {
