@@ -193,6 +193,17 @@ pub enum EcSignKey {
     P384(Vec<u8>),
 }
 
+impl EcSignKey {
+    /// Return the Cose signing algorithm corresponds to the given signing key.
+    pub fn get_cose_sign_algorithm(&self) -> iana::Algorithm {
+        match *self {
+            EcSignKey::Ed25519(_) => iana::Algorithm::EdDSA,
+            EcSignKey::P256(_) => iana::Algorithm::ES256,
+            EcSignKey::P384(_) => iana::Algorithm::ES384,
+        }
+    }
+}
+
 /// Variants of EC public key used to verify signature
 #[derive(Clone, Debug, PartialEq)]
 pub enum EcVerifyKey {
