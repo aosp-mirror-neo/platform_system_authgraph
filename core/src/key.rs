@@ -626,9 +626,8 @@ impl CertChain {
     }
 
     /// Extract the instance identifier (a.k.a. instance hash) from a pVM DICE chain as per
-    /// packages/modules/Virtualization/dice_for_avf_guest.cddl. We are specifically looking for the
-    /// instance hash included in the DICE certificate that has the component name = "vm_entry",
-    /// which is set by the PVMFW. If not present, return None.
+    /// packages/modules/Virtualization/dice_for_avf_guest.cddl. We search backwards from the leaf
+    /// and return the first instance hash we find. If not present, return None.
     pub fn extract_instance_identifier_in_guest_os_entry(
         &self,
     ) -> Result<Option<InstanceIdentifier>, Error> {
@@ -636,23 +635,15 @@ impl CertChain {
         // as `DiceChainEntryPayload` and check if instance identifier is present
         if let Some(dice_cert_chain) = &self.dice_cert_chain {
             for dice_cert in dice_cert_chain.iter().rev() {
-                if let Some(v) = &dice_cert.payload.full_map {
-                    let dice_chain_entry_payload =
-                        DiceChainEntryPayload::from_cbor_value(v.clone())?;
+                if let Some(dice_chain_entry_payload) = &dice_cert.payload.get_full_payload()? {
                     if let Some(ConfigurationDescriptorOrLegacy::Descriptor(config_desc)) =
-                        dice_chain_entry_payload.configuration_descriptor
+                        &dice_chain_entry_payload.configuration_descriptor
                     {
-                        if config_desc
-                            .component_name
-                            .map_or(false, |comp_name| comp_name == GUEST_OS_COMPONENT_NAME)
+                        let instance_hash_tuple =
+                            config_desc.custom_fields.iter().find(|v| v.0 == INSTANCE_HASH);
+                        if let Some((_, Value::Bytes(instance_hash))) = instance_hash_tuple.cloned()
                         {
-                            let instance_hash_tuple =
-                                config_desc.custom_fields.iter().find(|v| v.0 == INSTANCE_HASH);
-                            if let Some((_, Value::Bytes(instance_hash))) =
-                                instance_hash_tuple.cloned()
-                            {
-                                return Ok(Some(instance_hash));
-                            }
+                            return Ok(Some(instance_hash));
                         }
                     }
                 }
@@ -816,6 +807,18 @@ impl AsCborValue for DiceChainEntry {
         // contains the additional `payload` field only for the purpose of validation, therefore, it
         // does not need to be included in the CBOR encoding.
         self.signature.to_cbor_value()
+    }
+}
+
+impl DiceChainEntryPayloadPartiallyDecoded {
+    /// Get the complete DiceChainEntryPayload from the full map of this partially
+    /// decoded payload.
+    pub fn get_full_payload(&self) -> Result<Option<DiceChainEntryPayload>, Error> {
+        if let Some(v) = &self.full_map {
+            Ok(Some(DiceChainEntryPayload::from_cbor_value(v.clone())?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
