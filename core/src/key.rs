@@ -723,6 +723,46 @@ impl CertChain {
         }
         false
     }
+
+    /// Get the component name on the leaf cert of this CertChain.
+    /// On success this returns Ok(Some(String)), with the component name
+    /// of the leaf cert.
+    ///
+    /// If there is no leaf cert, or no component name on the leaf cert
+    /// this returns Ok(None).
+    ///
+    /// Otherwise, an Error is returned.
+    pub fn get_leaf_cert_component_name(&self) -> Result<Option<String>, Error> {
+        let chain = match &self.dice_cert_chain {
+            Some(x) => x,
+            // No cert chain
+            None => return Ok(None),
+        };
+
+        let last_cert = match chain.last() {
+            Some(x) => x,
+            // Empty cert chain
+            None => return Ok(None),
+        };
+
+        let full_payload = match last_cert.payload.get_full_payload()? {
+            Some(x) => x,
+            // No full map for this cert
+            None => return Ok(None),
+        };
+
+        match full_payload.configuration_descriptor {
+            Some(desc) => match desc {
+                ConfigurationDescriptorOrLegacy::Descriptor(desc) => Ok(desc.component_name),
+                ConfigurationDescriptorOrLegacy::Legacy(_) => Err(ag_err!(
+                    Unimplemented,
+                    "Cannot retrieve component name from legacy descriptor"
+                )),
+            },
+            // No config descriptor
+            None => Ok(None),
+        }
+    }
 }
 
 impl AsCborValue for CertChain {

@@ -21,7 +21,7 @@ use authgraph_wire::ErrorCode;
 use coset::CoseError;
 
 /// AuthGraph error type.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Error(pub ErrorCode, pub String);
 
 impl core::convert::From<CoseError> for Error {
