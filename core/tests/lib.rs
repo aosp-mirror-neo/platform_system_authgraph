@@ -29,7 +29,8 @@ mod tests {
         Identity,
     };
     use authgraph_core_test::{
-        create_dice_cert_chain_for_guest_os, create_dice_leaf_cert, SAMPLE_INSTANCE_HASH,
+        create_dice_cert_chain_for_guest_os, create_dice_leaf_cert, create_identity,
+        SAMPLE_INSTANCE_HASH, TEST_OS_COMPONENT_NAME,
     };
     use coset::CborSerializable;
 
@@ -190,5 +191,29 @@ mod tests {
         let dice_chain_2 =
             CertChain::from_slice(&cert_chain_bytes_2).expect("failed to decode dice chain 2");
         assert!(dice_chain_2.extend_with(&leaf_cert, &ecdsa).is_err());
+    }
+
+    #[test]
+    fn test_leaf_cert_component_name_no_cert_chain() {
+        let (_, serialized_identity) =
+            create_identity(0 /*no cert chain */).expect("error in creating identity");
+        let identity =
+            Identity::from_slice(&serialized_identity).expect("error in decoding the identity");
+
+        assert_eq!(Ok(None), identity.cert_chain.get_leaf_cert_component_name());
+    }
+
+    #[test]
+    fn test_leaf_cert_component_name() {
+        let (_, _, serialized_chain) =
+            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 1);
+        let dice_chain_res = CertChain::from_slice(&serialized_chain);
+        assert!(dice_chain_res.is_ok());
+        let dice_chain = dice_chain_res.unwrap();
+
+        assert_eq!(
+            Ok(Some(TEST_OS_COMPONENT_NAME.to_string())),
+            dice_chain.get_leaf_cert_component_name()
+        );
     }
 }
