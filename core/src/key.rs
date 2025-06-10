@@ -563,6 +563,9 @@ impl CertChain {
     ///    iii.`subject` in the parent's DiceChainEntryPayload matches the `issuer` in the current
     ///        DiceChainEntryPayload (except for the first DiceChainEntry)
     ///    iv. no two identical `subject` or `subject_pub_key` in the DiceChainEntryPayloads.
+    ///
+    /// On success, returns the EcVerifyKey (subject_public_key) of the last cert
+    /// in the cert chain. If there is no cert chain, returns the root public key.
     pub fn validate(&self, ecdsa: &dyn EcDsa) -> Result<EcVerifyKey, Error> {
         if self.version != EXPLICIT_KEY_DICE_CERT_CHAIN_VERSION {
             return Err(ag_err!(InvalidCertChain, "version mismatch"));
