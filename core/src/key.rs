@@ -559,9 +559,9 @@ impl CertChain {
     /// 4. if dice_cert_chain is present, check for each DiceChainEntry,
     ///    i.  Cose key parameters of `subject_pub_key`
     ///    ii. the signature is verified with the parent's `subject_pub_key` or with the `root_key`
-    ///        for the first DiceChainEntry
+    ///    for the first DiceChainEntry
     ///    iii.`subject` in the parent's DiceChainEntryPayload matches the `issuer` in the current
-    ///        DiceChainEntryPayload (except for the first DiceChainEntry)
+    ///    DiceChainEntryPayload (except for the first DiceChainEntry)
     ///    iv. no two identical `subject` or `subject_pub_key` in the DiceChainEntryPayloads.
     ///
     /// On success, returns the EcVerifyKey (subject_public_key) of the last cert
