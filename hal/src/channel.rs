@@ -44,14 +44,14 @@ pub fn write_msg<W: Write>(w: &mut W, data: &[u8]) -> binder::Result<()> {
     })?;
     let data_len_data = data_len.to_be_bytes();
     w.write_all(&data_len_data[..]).map_err(|e| {
-        error!("Failed to write length to stream: {}", e);
+        error!("Failed to write length to stream: {e}");
         binder::Status::new_exception(
             binder::ExceptionCode::BAD_PARCELABLE,
             Some(&CString::new("failed to write framing length").unwrap()),
         )
     })?;
     w.write_all(data).map_err(|e| {
-        error!("Failed to write data to stream: {}", e);
+        error!("Failed to write data to stream: {e}");
         binder::Status::new_exception(
             binder::ExceptionCode::BAD_PARCELABLE,
             Some(&CString::new("failed to write data").unwrap()),
@@ -65,13 +65,13 @@ pub fn read_msg<R: Read>(r: &mut R) -> binder::Result<Vec<u8>> {
     // The data read from the `Read` item has a 4-byte big-endian length prefix.
     let mut len_data = [0u8; 4];
     r.read_exact(&mut len_data).map_err(|e| {
-        error!("Failed to read length from stream: {}", e);
+        error!("Failed to read length from stream: {e}");
         binder::Status::new_exception(binder::ExceptionCode::TRANSACTION_FAILED, None)
     })?;
     let len = u32::from_be_bytes(len_data);
     let mut data = vec![0; len as usize];
     r.read_exact(&mut data).map_err(|e| {
-        error!("Failed to read data from stream: {}", e);
+        error!("Failed to read data from stream: {e}");
         binder::Status::new_exception(binder::ExceptionCode::TRANSACTION_FAILED, None)
     })?;
     Ok(data)

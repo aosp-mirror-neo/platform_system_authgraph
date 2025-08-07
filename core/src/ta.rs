@@ -73,7 +73,7 @@ impl AuthGraphTa {
                 (Some(req.code()), self.process_req(req))
             }
             Err(e) => {
-                error!("failed to decode CBOR request: {:?}", e);
+                error!("failed to decode CBOR request: {e:?}");
                 (None, error_rsp(ErrorCode::InternalError))
             }
         };
@@ -81,7 +81,7 @@ impl AuthGraphTa {
         match rsp.into_vec() {
             Ok(rsp_data) => rsp_data,
             Err(e) => {
-                error!("failed to encode CBOR response: {:?}", e);
+                error!("failed to encode CBOR response: {e:?}");
                 invalid_cbor_rsp_data().to_vec()
             }
         }
@@ -120,7 +120,7 @@ impl AuthGraphTa {
         match result {
             Ok(rsp) => PerformOpResponse { error_code: ErrorCode::Ok, rsp: Some(rsp) },
             Err(err) => {
-                warn!("failing {:?} request with error {:?}", code, err);
+                warn!("failing {code:?} request with error {err:?}");
                 error_rsp(err.0)
             }
         }
