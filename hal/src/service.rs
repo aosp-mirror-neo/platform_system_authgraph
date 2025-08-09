@@ -36,7 +36,7 @@ use wire::{
 pub fn failed_cbor(err: CborError) -> binder::Status {
     binder::Status::new_service_specific_error(
         ErrorCode::InternalError as i32,
-        Some(&CString::new(format!("CBOR conversion failed: {:?}", err)).unwrap()),
+        Some(&CString::new(format!("CBOR conversion failed: {err:?}")).unwrap()),
     )
 }
 

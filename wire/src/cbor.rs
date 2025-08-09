@@ -64,12 +64,12 @@ impl<T> From<ciborium::ser::Error<T>> for CborError {
 impl core::fmt::Debug for CborError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CborError::DecodeFailed(de) => write!(f, "decode CBOR failure: {:?}", de),
+            CborError::DecodeFailed(de) => write!(f, "decode CBOR failure: {de:?}"),
             CborError::EncodeFailed => write!(f, "encode CBOR failure"),
             CborError::ExtraneousData => write!(f, "extraneous data in CBOR input"),
             CborError::OutOfRangeIntegerValue => write!(f, "out of range integer value"),
             CborError::NonEnumValue => write!(f, "integer not a valid enum value"),
-            CborError::UnexpectedItem(got, want) => write!(f, "got {}, expected {}", got, want),
+            CborError::UnexpectedItem(got, want) => write!(f, "got {got}, expected {want}"),
             CborError::InvalidValue => write!(f, "invalid CBOR value"),
             CborError::AllocationFailed => write!(f, "allocation failed"),
         }
