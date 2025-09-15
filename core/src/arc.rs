@@ -145,12 +145,11 @@ pub fn decipher_arc(
             .try_into()
             .map_err(|e| ag_err!(InternalError, "failed to decode iv {:?}", e))?,
     );
-    if arc.ciphertext.is_none() {
-        return Err(ag_err!(InternalError, "missing ciphertext"));
-    }
-    let payload = arc.decrypt(&[], |cipher_text, aad| {
-        cipher.decrypt(decrypting_key, cipher_text, aad, &nonce)
-    })?;
+    let payload = arc.decrypt_ciphertext(
+        &[],
+        || ag_err!(InternalError, "missing ciphertext"),
+        |cipher_text, aad| cipher.decrypt(decrypting_key, cipher_text, aad, &nonce),
+    )?;
     let (protected_headers, unprotected_headers) =
         (arc.protected.header.rest, arc.unprotected.rest);
     Ok(ArcContent { payload: ArcPayload(payload), protected_headers, unprotected_headers })
