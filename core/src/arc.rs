@@ -145,6 +145,9 @@ pub fn decipher_arc(
             .try_into()
             .map_err(|e| ag_err!(InternalError, "failed to decode iv {:?}", e))?,
     );
+    if arc.ciphertext.is_none() {
+        return Err(ag_err!(InternalError, "missing ciphertext"));
+    }
     let payload = arc.decrypt(&[], |cipher_text, aad| {
         cipher.decrypt(decrypting_key, cipher_text, aad, &nonce)
     })?;
