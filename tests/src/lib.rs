@@ -885,7 +885,7 @@ pub fn validate_identity<E: EcDsa>(ecdsa: &E) {
 /// Return the private signing key corresponding to the public signing key.
 pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Error> {
     let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
-    let (root_pub_key, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+    let (root_pub_key, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
         .expect("failed to create key pair from seed.");
     let root_pub_cose_key = CoseKey {
         kty: KeyType::Assigned(iana::KeyType::OKP),
@@ -971,7 +971,7 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         ]);
         let pvt_key_seed =
             diced_open_dice::derive_cdi_private_key_seed(&cdi_values_1.cdi_attest).unwrap();
-        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
             .expect("failed to create key pair from seed.");
         let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
             pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
@@ -1040,7 +1040,7 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         ]);
         let pvt_key_seed =
             diced_open_dice::derive_cdi_private_key_seed(&cdi_values_2.cdi_attest).unwrap();
-        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
             .expect("failed to create key pair from seed.");
         let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
             pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
@@ -1103,7 +1103,7 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         ]);
         let pvt_key_seed =
             diced_open_dice::derive_cdi_private_key_seed(&cdi_values_3.cdi_attest).unwrap();
-        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
             .expect("failed to create key pair from seed.");
         let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
             pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
@@ -1167,7 +1167,7 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         ]);
         let pvt_key_seed =
             diced_open_dice::derive_cdi_private_key_seed(&cdi_values_4.cdi_attest).unwrap();
-        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
             .expect("failed to create key pair from seed.");
         let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
             pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
@@ -1232,7 +1232,7 @@ pub fn create_identity(dice_chain_len: usize) -> Result<(EcSignKey, Vec<u8>), Er
         ]);
         let pvt_key_seed =
             diced_open_dice::derive_cdi_private_key_seed(&cdi_values_5.cdi_attest).unwrap();
-        let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+        let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
             .expect("failed to create key pair from seed.");
         let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] =
             pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN].try_into().map_err(|e| {
@@ -1267,8 +1267,9 @@ pub fn create_dice_cert_chain_for_guest_os(
     security_version: u64,
 ) -> (EcSignKey, CdiValues, Vec<u8>) {
     let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
-    let (root_pub_key, _pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
-        .expect("failed to create key pair from seed.");
+    let (root_pub_key, _pvt_key) =
+        diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
+            .expect("failed to create key pair from seed.");
     let root_pub_cose_key = CoseKey {
         kty: KeyType::Assigned(iana::KeyType::OKP),
         alg: Some(Algorithm::Assigned(iana::Algorithm::EdDSA)),
@@ -1480,7 +1481,7 @@ pub fn create_dice_cert_chain_for_guest_os(
     ]);
     let pvt_key_seed =
         diced_open_dice::derive_cdi_private_key_seed(&cdi_values_4.cdi_attest).unwrap();
-    let (_, pvt_key) = diced_open_dice::keypair_from_seed(pvt_key_seed.as_array())
+    let (_, pvt_key) = diced_open_dice::keypair_from_seed(None, pvt_key_seed.as_array())
         .expect("failed to create key pair from seed.");
     let pvt_key: [u8; CURVE25519_PRIV_KEY_LEN] = pvt_key.as_array()[0..CURVE25519_PRIV_KEY_LEN]
         .try_into()
