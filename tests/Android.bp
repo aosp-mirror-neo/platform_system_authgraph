@@ -19,7 +19,8 @@ package {
 rust_library {
     name: "libauthgraph_core_test",
     crate_name: "authgraph_core_test",
-    srcs: ["src/lib.rs"],
+    crate_root: "src/lib.rs",
+    srcs: ["**/*.hex"],
     edition: "2021",
     lints: "android",
     host_supported: true,
