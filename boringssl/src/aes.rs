@@ -15,7 +15,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 //! BoringSSL-based implementation for the AuthGraph AES traits.
-use crate::ossl;
 use authgraph_core::{
     ag_err,
     error::Error,
