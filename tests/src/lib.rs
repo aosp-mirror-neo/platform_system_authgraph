@@ -1495,7 +1495,7 @@ pub fn create_dice_cert_chain_for_guest_os(
 
 /// Helper function for testing which derives child DICE artifacts and creates a certificate
 pub fn create_dice_leaf_cert(
-    parent_cdi_values: CdiValues,
+    parent_cdi_values: &CdiValues,
     component_name: &str,
     security_version: u64,
 ) -> Vec<u8> {
