@@ -156,14 +156,14 @@ mod tests {
         assert_eq!(instance_hash, None);
     }
 
-    /// Test extending a DICE chain with a giveen DICE certificate
+    /// Test extending a DICE chain with a given DICE certificate
     #[test]
     fn test_dice_chain_extend() {
         let ecdsa = BoringEcDsa;
         // Create a DICE chain for a pvm instance and a leaf cert for keymint TA
         let (_sign_key, cdi_values, cert_chain_bytes) =
             create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 1);
-        let leaf_cert_bytes = create_dice_leaf_cert(cdi_values, "keymint", 1);
+        let leaf_cert_bytes = create_dice_leaf_cert(&cdi_values, "keymint", 1);
         let dice_chain =
             CertChain::from_slice(&cert_chain_bytes).expect("failed to decode dice chain");
         let leaf_cert =
