@@ -402,6 +402,20 @@ pub struct DiceChainEntryPayload {
     pub custom_fields: Vec<(i64, Value)>,
 }
 
+/// Mode Decision (represented by 1 byte), as per Open Profile for DICE.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Mode is not configured
+    NotConfigured = 0,
+    /// Mode is Normal
+    Normal = 1,
+    /// Mode is Debug
+    Debug = 2,
+    /// Mode is Recovery
+    Recovery = 3,
+}
+
 /// Type alias for an instance identifier found in a DICE certificate for a pVM instance
 pub type InstanceIdentifier = Vec<u8>;
 
@@ -653,6 +667,34 @@ impl CertChain {
             }
         }
         Ok(None)
+    }
+
+    /// Inspect "mode" value in each of the certificates in the DICE chain and return true only if
+    /// all the certificates contains mode = Normal.
+    pub fn are_all_certs_mode_normal(&self) -> Result<bool, Error> {
+        if let Some(dice_cert_chain) = &self.dice_cert_chain {
+            for dice_cert in dice_cert_chain.iter() {
+                let dice_chain_entry_payload =
+                    &dice_cert.payload.get_full_payload()?.ok_or_else(|| {
+                        ag_err!(InvalidCertChain, "Failed to get full payload for checking Mode.")
+                    })?;
+                let mode = &dice_chain_entry_payload
+                    .mode
+                    .as_ref()
+                    .ok_or_else(|| ag_err!(InvalidCertChain, "Mode is not present."))?;
+                if mode.len() != 1 {
+                    return Err(ag_err!(
+                        InvalidCertChain,
+                        "Mode is expected to be one byte. Got {:?} bytes.",
+                        mode.len()
+                    ));
+                }
+                if mode[0] != Mode::Normal as u8 {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Convert a DICE chain to explicit key DICE chain format, if it is not already in this format.

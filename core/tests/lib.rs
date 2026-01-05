@@ -130,8 +130,11 @@ mod tests {
     /// instance hash
     #[test]
     fn test_instance_hash_extraction_with_code_generated_dice_chain() {
-        let (_, _, dice_chain_bytes) =
-            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 1);
+        let (_, _, dice_chain_bytes) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            1,
+            true, /*normal mode*/
+        );
         let dice_cert_chain =
             CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
         // Extract the instance hash
@@ -146,7 +149,8 @@ mod tests {
     /// has instance hash
     #[test]
     fn test_instance_hash_extraction_with_code_generated_dice_chain_negative() {
-        let (_, _, dice_chain_bytes) = create_dice_cert_chain_for_guest_os(None, 0);
+        let (_, _, dice_chain_bytes) =
+            create_dice_cert_chain_for_guest_os(None, 0, true /*normal mode*/);
         let dice_cert_chain =
             CertChain::from_slice(&dice_chain_bytes).expect("error decoding the DICE chain");
         // Extract the instance id
@@ -161,8 +165,11 @@ mod tests {
     fn test_dice_chain_extend() {
         let ecdsa = BoringEcDsa;
         // Create a DICE chain for a pvm instance and a leaf cert for keymint TA
-        let (_sign_key, cdi_values, cert_chain_bytes) =
-            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 1);
+        let (_sign_key, cdi_values, cert_chain_bytes) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            1,
+            true, /*normal mode*/
+        );
         let leaf_cert_bytes = create_dice_leaf_cert(&cdi_values, "keymint", 1);
         let dice_chain =
             CertChain::from_slice(&cert_chain_bytes).expect("failed to decode dice chain");
@@ -186,8 +193,11 @@ mod tests {
 
         // Create a secondary DICE chain, try to extend it with the previous leaf cert and expect
         // error
-        let (_, _, cert_chain_bytes_2) =
-            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 2);
+        let (_, _, cert_chain_bytes_2) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            2,
+            true, /*normal mode*/
+        );
         let dice_chain_2 =
             CertChain::from_slice(&cert_chain_bytes_2).expect("failed to decode dice chain 2");
         assert!(dice_chain_2.extend_with(&leaf_cert, &ecdsa).is_err());
@@ -205,8 +215,11 @@ mod tests {
 
     #[test]
     fn test_leaf_cert_component_name() {
-        let (_, _, serialized_chain) =
-            create_dice_cert_chain_for_guest_os(Some(SAMPLE_INSTANCE_HASH), 1);
+        let (_, _, serialized_chain) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            1,
+            true, /*normal mode*/
+        );
         let dice_chain_res = CertChain::from_slice(&serialized_chain);
         assert!(dice_chain_res.is_ok());
         let dice_chain = dice_chain_res.unwrap();
@@ -214,6 +227,30 @@ mod tests {
         assert_eq!(
             Ok(Some(TEST_OS_COMPONENT_NAME.to_string())),
             dice_chain.get_leaf_cert_component_name()
+        );
+    }
+
+    #[test]
+    fn test_is_dice_chain_mode_normal() {
+        let (_, _, serialized_chain) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            1,
+            true, /*normal mode*/
+        );
+        assert!(CertChain::from_slice(&serialized_chain)
+            .unwrap()
+            .are_all_certs_mode_normal()
+            .unwrap());
+        let (_, _, serialized_chain) = create_dice_cert_chain_for_guest_os(
+            Some(SAMPLE_INSTANCE_HASH),
+            1,
+            false, /*test mode*/
+        );
+        assert!(
+            !(CertChain::from_slice(&serialized_chain)
+                .unwrap()
+                .are_all_certs_mode_normal()
+                .unwrap())
         );
     }
 }
