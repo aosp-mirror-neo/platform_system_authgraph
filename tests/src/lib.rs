@@ -1260,11 +1260,14 @@ pub fn test_example_identity_validate<E: EcDsa>(ecdsa: &E) {
     identity.validate(ecdsa).expect("identity did not validate");
 }
 
-/// This is a util method for writing tests related to the instance identifier in the vm entry of a
-/// pvm DICE chain. Returns the leaf private signing key, leaf CDI values and the sample DICE chain.
+/// This is a util method for writing tests for a pvm DICE chain. Returns the leaf private
+/// signing key, leaf CDI values and the sample DICE chain.
+/// If dice chain mode is requested to be normal, set mode=Normal in all certificates, otherwise,
+/// set a different mode in some of the certificates.
 pub fn create_dice_cert_chain_for_guest_os(
     instance_hash_for_vm_entry: Option<[u8; 64]>,
     security_version: u64,
+    is_dice_chain_mode_normal: bool,
 ) -> (EcSignKey, CdiValues, Vec<u8>) {
     let pvt_key_seed = diced_open_dice::derive_cdi_private_key_seed(&UDS).unwrap();
     let (root_pub_key, _pvt_key) =
@@ -1321,7 +1324,11 @@ pub fn create_dice_cert_chain_for_guest_os(
         CODE_HASH_TRUSTY,
         diced_open_dice::Config::Descriptor(config_descriptor_1.as_slice()),
         AUTHORITY_HASH_TRUSTY,
-        diced_open_dice::DiceMode::kDiceModeDebug,
+        if is_dice_chain_mode_normal {
+            diced_open_dice::DiceMode::kDiceModeNormal
+        } else {
+            diced_open_dice::DiceMode::kDiceModeDebug
+        },
         HIDDEN_TRUSTY,
     );
     let (cdi_values_1, cert_1) = diced_open_dice::retry_dice_main_flow(&UDS, &UDS, &input_values_1)
@@ -1363,7 +1370,7 @@ pub fn create_dice_cert_chain_for_guest_os(
         CODE_HASH_ABL,
         diced_open_dice::Config::Descriptor(config_descriptor_2.as_slice()),
         AUTHORITY_HASH_ABL,
-        diced_open_dice::DiceMode::kDiceModeDebug,
+        diced_open_dice::DiceMode::kDiceModeNormal,
         HIDDEN_ABL,
     );
 
@@ -1409,7 +1416,7 @@ pub fn create_dice_cert_chain_for_guest_os(
         CODE_HASH_PVMFW,
         diced_open_dice::Config::Descriptor(config_descriptor_3.as_slice()),
         AUTHORITY_HASH_PVMFW,
-        diced_open_dice::DiceMode::kDiceModeDebug,
+        diced_open_dice::DiceMode::kDiceModeNormal,
         HIDDEN_PVMFW,
     );
 
@@ -1460,7 +1467,11 @@ pub fn create_dice_cert_chain_for_guest_os(
         CODE_HASH_VM,
         diced_open_dice::Config::Descriptor(config_descriptor_4.as_slice()),
         AUTHORITY_HASH_VM,
-        diced_open_dice::DiceMode::kDiceModeDebug,
+        if is_dice_chain_mode_normal {
+            diced_open_dice::DiceMode::kDiceModeNormal
+        } else {
+            diced_open_dice::DiceMode::kDiceModeDebug
+        },
         HIDDEN_VM,
     );
 
