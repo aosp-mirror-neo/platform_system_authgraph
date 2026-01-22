@@ -54,7 +54,13 @@ rust_library_rlib {
 rust_test {
     name: "libauthgraph_core_unit_test",
     crate_name: "authgraph_core_unit_test",
-    srcs: ["tests/lib.rs"],
+    crate_root: "tests/lib.rs",
+    srcs: [
+        "tests/lib.rs",
+        "testdata/bcc",
+        ":libauthgraph_core_test_hex_srcs",
+    ],
+    use_expansive_default_srcs: false,
     host_supported: true,
     rustlibs: [
         "libauthgraph_boringssl",

@@ -20,7 +20,11 @@ rust_library {
     name: "libauthgraph_core_test",
     crate_name: "authgraph_core_test",
     crate_root: "src/lib.rs",
-    srcs: ["**/*.hex"],
+    srcs: [
+        "src/lib.rs",
+        ":libauthgraph_core_test_hex_srcs",
+    ],
+    use_expansive_default_srcs: false,
     edition: "2021",
     lints: "android",
     host_supported: true,
@@ -32,4 +36,10 @@ rust_library {
         "libdiced_open_dice",
         "libhex",
     ],
+}
+
+filegroup {
+    name: "libauthgraph_core_test_hex_srcs",
+    srcs: ["**/*.hex"],
+    visibility: ["//system/authgraph/core:__pkg__"],
 }
